@@ -9,7 +9,7 @@ import * as THREE from 'three';
 //   - Rayleigh scattering  → blue sky, orange/red sunsets
 //   - Mie scattering       → bright halo around the sun
 //   - Henyey-Greenstein phase function for directional Mie
-//   - Adaptive step count  → fewer samples when far from planet
+//   - Terrain-following ground level via heightmap cubemap
 // ---------------------------------------------------------------------------
 
 const ATMOSPHERE_VERTEX = /* glsl */ `
@@ -27,14 +27,16 @@ void main() {
 const ATMOSPHERE_FRAGMENT = /* glsl */ `
 // ---- Uniforms ----
 uniform vec3  uSunDir;        // Normalised direction TO the sun
-uniform float uPlanetRadius;  // Surface radius
+uniform float uPlanetRadius;  // Base planet radius (no terrain)
 uniform float uAtmoRadius;    // Top-of-atmosphere radius
-uniform float uRayleighScale; // Rayleigh scale height (e.g. 8.0 km → 8.0 in world units)
-uniform float uMieScale;      // Mie scale height (e.g. 1.2)
-uniform vec3  uRayleighCoeff; // Rayleigh scattering coefficients (wavelength-dependent)
+uniform float uRayleighScale; // Rayleigh scale height
+uniform float uMieScale;      // Mie scale height
+uniform vec3  uRayleighCoeff; // Rayleigh scattering coefficients
 uniform float uMieCoeff;      // Mie scattering coefficient
-uniform float uMieG;          // Mie asymmetry (Henyey-Greenstein g, e.g. 0.76)
+uniform float uMieG;          // Mie asymmetry (Henyey-Greenstein g)
 uniform float uIntensity;     // Sun intensity multiplier
+uniform samplerCube uHeightMap;  // Terrain height cubemap [0,1]
+uniform float uTerrainHeight;   // Max terrain displacement in world units
 
 varying vec3 vWorldPos;
 varying vec3 vWorldDir;
@@ -45,7 +47,6 @@ varying vec3 vWorldDir;
 #define NUM_LIGHT_STEPS 8
 
 // ---- Ray-sphere intersection ----
-// Returns (tNear, tFar). If no hit, tNear > tFar.
 vec2 raySphere(vec3 ro, vec3 rd, float radius) {
   float b = dot(ro, rd);
   float c = dot(ro, ro) - radius * radius;
@@ -67,6 +68,12 @@ float phaseMie(float cosTheta, float g) {
   return (3.0 / (8.0 * PI)) * num / denom;
 }
 
+// Get the terrain surface radius at a given direction
+float getTerrainRadius(vec3 dir) {
+  float hNorm = textureCube(uHeightMap, dir).r;
+  return uPlanetRadius + hNorm * uTerrainHeight;
+}
+
 // ---- Main ----
 void main() {
   vec3 rayOrigin = cameraPosition;
@@ -76,8 +83,9 @@ void main() {
   vec2 tAtmo = raySphere(rayOrigin, rayDir, uAtmoRadius);
   if (tAtmo.x > tAtmo.y) { discard; }
 
-  // Intersect planet surface (to stop ray at ground)
-  vec2 tPlanet = raySphere(rayOrigin, rayDir, uPlanetRadius);
+  // Conservative ground sphere: use max possible terrain radius to stop ray
+  float maxGroundRadius = uPlanetRadius + uTerrainHeight;
+  vec2 tPlanet = raySphere(rayOrigin, rayDir, maxGroundRadius);
   bool hitPlanet = (tPlanet.x < tPlanet.y) && (tPlanet.x > 0.0);
 
   // Clamp ray segment to atmosphere
@@ -98,9 +106,19 @@ void main() {
   for (int i = 0; i < NUM_VIEW_STEPS; i++) {
     float t = tStart + (float(i) + 0.5) * stepSize;
     vec3 samplePos = rayOrigin + rayDir * t;
-    float altitude = length(samplePos) - uPlanetRadius;
+    float sampleR = length(samplePos);
+    vec3 sampleDir = samplePos / sampleR;
 
-    // Density at this altitude (exponential falloff)
+    // Look up the terrain surface height at this direction
+    float surfaceRadius = getTerrainRadius(sampleDir);
+
+    // Altitude above the local terrain surface
+    float altitude = sampleR - surfaceRadius;
+
+    // Skip samples that are underground
+    if (altitude < 0.0) continue;
+
+    // Density at this altitude (exponential falloff from local surface)
     float densR = exp(-altitude / uRayleighScale) * stepSize;
     float densM = exp(-altitude / uMieScale)      * stepSize;
 
@@ -108,10 +126,7 @@ void main() {
     opticalDepthM += densM;
 
     // ---- Light (sun) ray march from sample point toward sun ----
-    // We need the distance from samplePos to the atmosphere exit along sunDir.
     vec2 tSunAtmo = raySphere(samplePos, uSunDir, uAtmoRadius);
-    // samplePos is inside the atmosphere, so tSunAtmo.x < 0, tSunAtmo.y > 0.
-    // The exit distance is tSunAtmo.y.
     float sunPathLen = max(tSunAtmo.y, 0.0);
     float sunStepSize = sunPathLen / float(NUM_LIGHT_STEPS);
 
@@ -122,14 +137,19 @@ void main() {
     for (int j = 0; j < NUM_LIGHT_STEPS; j++) {
       float ts = (float(j) + 0.5) * sunStepSize;
       vec3 lightSample = samplePos + uSunDir * ts;
-      float lightAlt = length(lightSample) - uPlanetRadius;
+      float lightR = length(lightSample);
+      vec3 lightDir = lightSample / lightR;
+
+      // Terrain-aware altitude for light samples
+      float lightSurfaceR = getTerrainRadius(lightDir);
+      float lightAlt = lightR - lightSurfaceR;
+
       if (lightAlt < 0.0) { shadow = true; break; }
       optDepthLR += exp(-lightAlt / uRayleighScale) * sunStepSize;
       optDepthLM += exp(-lightAlt / uMieScale)      * sunStepSize;
     }
 
     if (!shadow) {
-      // Combined optical depth: camera→sample + sample→sun
       vec3 tau = uRayleighCoeff * (opticalDepthR + optDepthLR)
                + uMieCoeff      * (opticalDepthM + optDepthLM);
       vec3 attenuation = exp(-tau);
@@ -150,7 +170,6 @@ void main() {
   // Alpha: based on how much atmosphere the ray passed through
   float totalOD = length(uRayleighCoeff) * opticalDepthR + uMieCoeff * opticalDepthM;
   float alpha = 1.0 - exp(-totalOD * 1.5);
-  // Ensure visible even from far away (limb glow)
   alpha = max(alpha, 0.0);
 
   // Tone-map scatter to prevent blow-out around sun
@@ -182,21 +201,16 @@ export interface AtmosphereConfig {
   intensity: number;
   /** Sphere geometry resolution */
   segments: number;
+  /** Max terrain height in world units (needed for ground-following atmosphere) */
+  terrainHeight: number;
+  /** Terrain heightmap cubemap — each texel stores normalised height [0,1] */
+  heightCubemap: THREE.CubeTexture | null;
 }
 
 // Scale heights and coefficients must be proportional to our world.
 // Earth: radius 6371 km, atmosphere ~100 km, Rayleigh scale height ~8.5 km.
 // Our world: radius 1000, atmosphere shell ~60 units (6% of radius).
-// Scale factor: 1000/6371 ≈ 0.157.  So 8.5 km → ~8.5 * 0.157 ≈ 1.33 → but we
-// want a *visible* atmosphere, so we use slightly larger values for artistic effect.
-//
-// Scattering coefficients are per-unit, so they must be scaled inversely
-// to keep optical depth (coeff * path_length) in the same range.
-// Earth path through atmosphere is ~100 km; ours is ~60 units.
-// Earth Rayleigh coefficients are ~(5.8, 13.5, 33.1) × 10^-6 per metre
-//   = (5.8, 13.5, 33.1) × 10^-3 per km.
-// Over 100 km that gives optical depth ~ 0.58, 1.35, 3.31.
-// We want similar optical depths over ~60 units → coeff = depth / 60.
+// The atmosphere starts at the terrain surface and extends upward.
 
 const DEFAULT_CONFIG: AtmosphereConfig = {
   planetRadius: 1000,
@@ -208,6 +222,8 @@ const DEFAULT_CONFIG: AtmosphereConfig = {
   mieG: 0.76,
   intensity: 22.0,
   segments: 80,
+  terrainHeight: 0,
+  heightCubemap: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -220,7 +236,13 @@ export class Atmosphere {
 
   constructor(config?: Partial<AtmosphereConfig>) {
     const cfg = { ...DEFAULT_CONFIG, ...config };
-    const atmoRadius = cfg.planetRadius * cfg.atmosphereScale;
+
+    // The atmosphere shell must extend above the highest possible terrain
+    const maxSurface = cfg.planetRadius + cfg.terrainHeight;
+    const atmoRadius = maxSurface * cfg.atmosphereScale;
+
+    // If no cubemap provided, create a black dummy (all height = 0)
+    const heightMap = cfg.heightCubemap ?? createDummyCubemap();
 
     this.material = new THREE.ShaderMaterial({
       vertexShader: ATMOSPHERE_VERTEX,
@@ -235,6 +257,8 @@ export class Atmosphere {
         uMieCoeff:      { value: cfg.mieCoeff },
         uMieG:          { value: cfg.mieG },
         uIntensity:     { value: cfg.intensity },
+        uHeightMap:     { value: heightMap },
+        uTerrainHeight: { value: cfg.terrainHeight },
       },
       transparent: true,
       side: THREE.BackSide,
@@ -255,4 +279,21 @@ export class Atmosphere {
     this.mesh.geometry.dispose();
     this.material.dispose();
   }
+}
+
+function createDummyCubemap(): THREE.CubeTexture {
+  const size = 1;
+  const canvases: HTMLCanvasElement[] = [];
+  for (let i = 0; i < 6; i++) {
+    const c = document.createElement('canvas');
+    c.width = size;
+    c.height = size;
+    const ctx = c.getContext('2d')!;
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, 1, 1);
+    canvases.push(c);
+  }
+  const tex = new THREE.CubeTexture(canvases);
+  tex.needsUpdate = true;
+  return tex;
 }

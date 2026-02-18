@@ -417,6 +417,76 @@ function buildPatchGeometry(bounds: QuadBounds): THREE.BufferGeometry {
 }
 
 // ---------------------------------------------------------------------------
+// Terrain heightmap cubemap for atmosphere
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a cubemap where each texel stores the terrain height [0,1] for that direction.
+ * Uses the standard OpenGL cubemap face directions so textureCube() in the shader
+ * returns the correct value for any world-space direction.
+ */
+function buildHeightCubemap(resolution: number): THREE.CubeTexture {
+  const size = resolution;
+
+  // Standard OpenGL cubemap: for each face, define the major axis direction
+  // and how (s,t) in [0,1]^2 map to the other two axes.
+  // Face order: +X, -X, +Y, -Y, +Z, -Z
+  const faceDirs: { major: number[]; sAxis: number[]; tAxis: number[] }[] = [
+    { major: [ 1, 0, 0], sAxis: [ 0, 0,-1], tAxis: [ 0,-1, 0] }, // +X
+    { major: [-1, 0, 0], sAxis: [ 0, 0, 1], tAxis: [ 0,-1, 0] }, // -X
+    { major: [ 0, 1, 0], sAxis: [ 1, 0, 0], tAxis: [ 0, 0, 1] }, // +Y
+    { major: [ 0,-1, 0], sAxis: [ 1, 0, 0], tAxis: [ 0, 0,-1] }, // -Y
+    { major: [ 0, 0, 1], sAxis: [ 1, 0, 0], tAxis: [ 0,-1, 0] }, // +Z
+    { major: [ 0, 0,-1], sAxis: [-1, 0, 0], tAxis: [ 0,-1, 0] }, // -Z
+  ];
+
+  const dir = new THREE.Vector3();
+  const faces: ImageData[] = [];
+
+  for (let face = 0; face < 6; face++) {
+    const { major, sAxis, tAxis } = faceDirs[face];
+    const data = new Uint8ClampedArray(size * size * 4);
+
+    for (let y = 0; y < size; y++) {
+      const tv = (2.0 * (y + 0.5) / size - 1.0); // -1 to 1
+      for (let x = 0; x < size; x++) {
+        const su = (2.0 * (x + 0.5) / size - 1.0); // -1 to 1
+
+        dir.set(
+          major[0] + sAxis[0] * su + tAxis[0] * tv,
+          major[1] + sAxis[1] * su + tAxis[1] * tv,
+          major[2] + sAxis[2] * su + tAxis[2] * tv,
+        ).normalize();
+
+        const h = sampleHeight(dir);
+        const byte = Math.max(0, Math.min(255, Math.round(h * 255)));
+        const idx = (y * size + x) * 4;
+        data[idx] = byte;
+        data[idx + 1] = byte;
+        data[idx + 2] = byte;
+        data[idx + 3] = 255;
+      }
+    }
+    faces.push(new ImageData(data, size, size));
+  }
+
+  // CubeTexture expects 6 image sources — use canvases drawn from ImageData
+  const canvases = faces.map(img => {
+    const c = document.createElement('canvas');
+    c.width = size;
+    c.height = size;
+    c.getContext('2d')!.putImageData(img, 0, 0);
+    return c;
+  });
+
+  const cubeTex = new THREE.CubeTexture(canvases);
+  cubeTex.needsUpdate = true;
+  cubeTex.minFilter = THREE.LinearFilter;
+  cubeTex.magFilter = THREE.LinearFilter;
+  return cubeTex;
+}
+
+// ---------------------------------------------------------------------------
 // Ocean
 // ---------------------------------------------------------------------------
 
@@ -469,7 +539,13 @@ export class Planet {
     this.ocean.renderOrder = 0;
     this.group.add(this.ocean);
 
-    this.atmosphere = new Atmosphere({ planetRadius: PLANET_RADIUS });
+    // Build terrain heightmap cubemap for atmosphere ground-following
+    const heightCube = buildHeightCubemap(256);
+    this.atmosphere = new Atmosphere({
+      planetRadius: PLANET_RADIUS,
+      terrainHeight: TERRAIN_HEIGHT,
+      heightCubemap: heightCube,
+    });
     this.group.add(this.atmosphere.mesh);
   }
 
