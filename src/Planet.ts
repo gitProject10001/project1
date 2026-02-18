@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { SimplexNoise3D } from './SimplexNoise';
+import { Atmosphere } from './Atmosphere';
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -128,11 +129,6 @@ function sampleHeight(dir: THREE.Vector3): number {
   }
 
   return h;
-}
-
-/** Attempt a raw → [-1,1] style return for backward compat */
-function sampleHeightRaw(dir: THREE.Vector3): number {
-  return sampleHeight(dir) * 2.0 - 1.0;
 }
 
 function smoothstep(edge0: number, edge1: number, x: number): number {
@@ -421,47 +417,6 @@ function buildPatchGeometry(bounds: QuadBounds): THREE.BufferGeometry {
 }
 
 // ---------------------------------------------------------------------------
-// Atmosphere
-// ---------------------------------------------------------------------------
-
-function createAtmosphere(): THREE.Mesh {
-  const vertexShader = `
-    varying vec3 vNormal;
-    varying vec3 vWorldPos;
-    void main() {
-      vNormal = normalize(normalMatrix * normal);
-      vec4 wp = modelMatrix * vec4(position, 1.0);
-      vWorldPos = wp.xyz;
-      gl_Position = projectionMatrix * viewMatrix * wp;
-    }
-  `;
-  const fragmentShader = `
-    uniform vec3 uCameraPos;
-    varying vec3 vNormal;
-    varying vec3 vWorldPos;
-    void main() {
-      vec3 viewDir = normalize(uCameraPos - vWorldPos);
-      float rim = 1.0 - max(dot(viewDir, vNormal), 0.0);
-      rim = pow(rim, 3.5);
-      vec3 col = mix(vec3(0.25, 0.55, 1.0), vec3(0.5, 0.75, 1.0), rim);
-      float alpha = rim * 0.5;
-      gl_FragColor = vec4(col, alpha);
-    }
-  `;
-
-  const geo = new THREE.SphereGeometry(PLANET_RADIUS * 1.02, 64, 64);
-  const mat = new THREE.ShaderMaterial({
-    vertexShader,
-    fragmentShader,
-    uniforms: { uCameraPos: { value: new THREE.Vector3() } },
-    transparent: true,
-    side: THREE.BackSide,
-    depthWrite: false,
-  });
-  return new THREE.Mesh(geo, mat);
-}
-
-// ---------------------------------------------------------------------------
 // Ocean
 // ---------------------------------------------------------------------------
 
@@ -496,7 +451,7 @@ const patchMaterial = new THREE.MeshPhongMaterial({
 export class Planet {
   group: THREE.Group;
   private roots: QuadNode[] = [];
-  private atmosphere: THREE.Mesh;
+  readonly atmosphere: Atmosphere;
   private ocean: THREE.Mesh;
   private leafMeshes = new Set<THREE.Mesh>();
   private frustum = new THREE.Frustum();
@@ -514,9 +469,8 @@ export class Planet {
     this.ocean.renderOrder = 0;
     this.group.add(this.ocean);
 
-    this.atmosphere = createAtmosphere();
-    this.atmosphere.renderOrder = 2;
-    this.group.add(this.atmosphere);
+    this.atmosphere = new Atmosphere({ planetRadius: PLANET_RADIUS });
+    this.group.add(this.atmosphere.mesh);
   }
 
   update(camera: THREE.Camera): void {
@@ -527,9 +481,6 @@ export class Planet {
       camera.matrixWorldInverse,
     );
     this.frustum.setFromProjectionMatrix(this.projScreenMatrix);
-
-    const atmoMat = this.atmosphere.material as THREE.ShaderMaterial;
-    (atmoMat.uniforms['uCameraPos'].value as THREE.Vector3).copy(camPos);
 
     const newLeaves = new Set<THREE.Mesh>();
     for (const root of this.roots) {
@@ -587,8 +538,7 @@ export class Planet {
 
   dispose(): void {
     for (const root of this.roots) root.dispose();
-    this.atmosphere.geometry.dispose();
-    (this.atmosphere.material as THREE.Material).dispose();
+    this.atmosphere.dispose();
     this.ocean.geometry.dispose();
     (this.ocean.material as THREE.Material).dispose();
   }

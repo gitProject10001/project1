@@ -99,6 +99,9 @@ scene.add(createStarfield());
 const planet = new Planet();
 scene.add(planet.group);
 
+// Pass sun direction to the atmosphere shader
+planet.atmosphere.setSunDirection(sunDir);
+
 // ---------------------------------------------------------------------------
 // HUD
 // ---------------------------------------------------------------------------
