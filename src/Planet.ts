@@ -598,7 +598,7 @@ export class Planet {
 
       // Frustum cull — hide but never destroy (prevents holes)
       // Use generous radius: account for terrain height + overlap margin
-      const patchRadius = node.bounds.size * (PLANET_RADIUS + TERRAIN_HEIGHT) * 2.0;
+      const patchRadius = node.bounds.size * (PLANET_RADIUS + TERRAIN_HEIGHT) * 2.0 + TERRAIN_HEIGHT;
       this.cullSphere.set(node.center, patchRadius);
       node.mesh.visible = this.frustum.intersectsSphere(this.cullSphere);
 

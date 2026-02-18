@@ -10,6 +10,12 @@ import * as THREE from 'three';
 //   - Mie scattering       → bright halo around the sun
 //   - Henyey-Greenstein phase function for directional Mie
 //   - Terrain-following ground level via heightmap cubemap
+//
+// The terrain heightmap only affects where density *starts* (the ground).
+// The outer atmosphere boundary is always a clean sphere so it looks
+// smooth from orbit. Near the surface, density is measured from the
+// local terrain height. Higher up, the terrain offset fades out so that
+// the atmosphere top is spherically symmetric.
 // ---------------------------------------------------------------------------
 
 const ATMOSPHERE_VERTEX = /* glsl */ `
@@ -28,7 +34,7 @@ const ATMOSPHERE_FRAGMENT = /* glsl */ `
 // ---- Uniforms ----
 uniform vec3  uSunDir;        // Normalised direction TO the sun
 uniform float uPlanetRadius;  // Base planet radius (no terrain)
-uniform float uAtmoRadius;    // Top-of-atmosphere radius
+uniform float uAtmoRadius;    // Top-of-atmosphere radius (smooth sphere)
 uniform float uRayleighScale; // Rayleigh scale height
 uniform float uMieScale;      // Mie scale height
 uniform vec3  uRayleighCoeff; // Rayleigh scattering coefficients
@@ -74,21 +80,38 @@ float getTerrainRadius(vec3 dir) {
   return uPlanetRadius + hNorm * uTerrainHeight;
 }
 
+// Compute altitude above local terrain, with smooth fade-out at height.
+// Near the surface: altitude measured from terrain (mountains push ground up).
+// High up: altitude measured from base planetRadius (smooth sphere).
+// This keeps the outer atmosphere boundary clean and spherical.
+float getAltitude(vec3 pos, float r, vec3 dir) {
+  float terrainR = getTerrainRadius(dir);
+  float terrainOffset = terrainR - uPlanetRadius;  // how much terrain raises ground here
+
+  // Fade out terrain influence with altitude above base planet
+  float altAboveBase = r - uPlanetRadius;
+  float shellThickness = uAtmoRadius - uPlanetRadius;
+  // Terrain fully affects the lowest 20% of atmosphere, fades to zero by 50%
+  float terrainBlend = 1.0 - smoothstep(shellThickness * 0.1, shellThickness * 0.4, altAboveBase);
+
+  float effectiveGround = uPlanetRadius + terrainOffset * terrainBlend;
+  return r - effectiveGround;
+}
+
 // ---- Main ----
 void main() {
   vec3 rayOrigin = cameraPosition;
   vec3 rayDir = normalize(vWorldDir);
 
-  // Intersect atmosphere shell
+  // Intersect the smooth outer atmosphere sphere
   vec2 tAtmo = raySphere(rayOrigin, rayDir, uAtmoRadius);
   if (tAtmo.x > tAtmo.y) { discard; }
 
-  // Conservative ground sphere: use max possible terrain radius to stop ray
-  float maxGroundRadius = uPlanetRadius + uTerrainHeight;
-  vec2 tPlanet = raySphere(rayOrigin, rayDir, maxGroundRadius);
+  // Intersect base planet sphere (conservative inner bound)
+  vec2 tPlanet = raySphere(rayOrigin, rayDir, uPlanetRadius);
   bool hitPlanet = (tPlanet.x < tPlanet.y) && (tPlanet.x > 0.0);
 
-  // Clamp ray segment to atmosphere
+  // Clamp ray segment to atmosphere shell
   float tStart = max(tAtmo.x, 0.0);
   float tEnd   = hitPlanet ? min(tPlanet.x, tAtmo.y) : tAtmo.y;
   if (tStart >= tEnd) { discard; }
@@ -109,11 +132,8 @@ void main() {
     float sampleR = length(samplePos);
     vec3 sampleDir = samplePos / sampleR;
 
-    // Look up the terrain surface height at this direction
-    float surfaceRadius = getTerrainRadius(sampleDir);
-
-    // Altitude above the local terrain surface
-    float altitude = sampleR - surfaceRadius;
+    // Terrain-aware altitude with smooth fade at height
+    float altitude = getAltitude(samplePos, sampleR, sampleDir);
 
     // Skip samples that are underground
     if (altitude < 0.0) continue;
@@ -141,8 +161,7 @@ void main() {
       vec3 lightDir = lightSample / lightR;
 
       // Terrain-aware altitude for light samples
-      float lightSurfaceR = getTerrainRadius(lightDir);
-      float lightAlt = lightR - lightSurfaceR;
+      float lightAlt = getAltitude(lightSample, lightR, lightDir);
 
       if (lightAlt < 0.0) { shadow = true; break; }
       optDepthLR += exp(-lightAlt / uRayleighScale) * sunStepSize;
@@ -214,7 +233,7 @@ export interface AtmosphereConfig {
 
 const DEFAULT_CONFIG: AtmosphereConfig = {
   planetRadius: 1000,
-  atmosphereScale: 1.06,                            // 6% above surface → 60 unit shell
+  atmosphereScale: 1.26,                            // 6% above surface → 60 unit shell
   rayleighScaleHeight: 10.0,                         // proportional to 60-unit shell
   mieScaleHeight: 3.5,                               // proportional
   rayleighCoeff: new THREE.Vector3(0.01, 0.025, 0.06),  // tuned for ~60 unit path
@@ -237,9 +256,8 @@ export class Atmosphere {
   constructor(config?: Partial<AtmosphereConfig>) {
     const cfg = { ...DEFAULT_CONFIG, ...config };
 
-    // The atmosphere shell must extend above the highest possible terrain
-    const maxSurface = cfg.planetRadius + cfg.terrainHeight;
-    const atmoRadius = maxSurface * cfg.atmosphereScale;
+    // Outer atmosphere shell is a clean sphere above the highest terrain
+    const atmoRadius = (cfg.planetRadius + cfg.terrainHeight) * cfg.atmosphereScale;
 
     // If no cubemap provided, create a black dummy (all height = 0)
     const heightMap = cfg.heightCubemap ?? createDummyCubemap();
@@ -263,6 +281,7 @@ export class Atmosphere {
       transparent: true,
       side: THREE.BackSide,
       depthWrite: false,
+      depthTest: true,   // respect the terrain depth buffer
     });
 
     const geo = new THREE.SphereGeometry(atmoRadius, cfg.segments, cfg.segments);
