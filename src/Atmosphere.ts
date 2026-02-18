@@ -21,12 +21,17 @@ import * as THREE from 'three';
 const ATMOSPHERE_VERTEX = /* glsl */ `
 varying vec3 vWorldPos;
 varying vec3 vWorldDir;
+varying vec2 vUv;
 
 void main() {
   vec4 wp = modelMatrix * vec4(position, 1.0);
   vWorldPos = wp.xyz;
   vWorldDir = wp.xyz - cameraPosition;
-  gl_Position = projectionMatrix * viewMatrix * wp;
+  vec4 clipPos = projectionMatrix * viewMatrix * wp;
+  gl_Position = clipPos;
+
+  // Screen-space UV for sampling the depth texture
+  vUv = clipPos.xy / clipPos.w * 0.5 + 0.5;
 }
 `;
 
@@ -44,13 +49,31 @@ uniform float uIntensity;     // Sun intensity multiplier
 uniform samplerCube uHeightMap;  // Terrain height cubemap [0,1]
 uniform float uTerrainHeight;   // Max terrain displacement in world units
 
+// Depth buffer integration
+uniform sampler2D tDepth;     // Scene depth texture (logarithmic depth)
+uniform float uCameraNear;
+uniform float uCameraFar;
+
 varying vec3 vWorldPos;
 varying vec3 vWorldDir;
+varying vec2 vUv;
 
 // ---- Constants ----
 #define PI 3.14159265359
 #define NUM_VIEW_STEPS 16
 #define NUM_LIGHT_STEPS 8
+
+// ---- Reconstruct linear depth from logarithmic depth buffer ----
+// Three.js logarithmic depth: gl_FragDepthEXT = log2(vFragDepth) * logDepthBufFC * 0.5
+// where logDepthBufFC = 2.0 / (log(far + 1.0) / log(2.0))
+// Stored as: depth = log2(clipW + 1.0) / log2(far + 1.0)
+float linearizeLogDepth(float d) {
+  if (d >= 1.0) return uCameraFar;
+  // Reverse: clipW = pow(2.0, d * log2(far + 1.0)) - 1.0
+  // clipW corresponds to the view-space Z (distance from camera along view axis)
+  float logFarP1 = log2(uCameraFar + 1.0);
+  return pow(2.0, d * logFarP1) - 1.0;
+}
 
 // ---- Ray-sphere intersection ----
 vec2 raySphere(vec3 ro, vec3 rd, float radius) {
@@ -81,17 +104,12 @@ float getTerrainRadius(vec3 dir) {
 }
 
 // Compute altitude above local terrain, with smooth fade-out at height.
-// Near the surface: altitude measured from terrain (mountains push ground up).
-// High up: altitude measured from base planetRadius (smooth sphere).
-// This keeps the outer atmosphere boundary clean and spherical.
 float getAltitude(vec3 pos, float r, vec3 dir) {
   float terrainR = getTerrainRadius(dir);
-  float terrainOffset = terrainR - uPlanetRadius;  // how much terrain raises ground here
+  float terrainOffset = terrainR - uPlanetRadius;
 
-  // Fade out terrain influence with altitude above base planet
   float altAboveBase = r - uPlanetRadius;
   float shellThickness = uAtmoRadius - uPlanetRadius;
-  // Terrain fully affects the lowest 20% of atmosphere, fades to zero by 50%
   float terrainBlend = 1.0 - smoothstep(shellThickness * 0.1, shellThickness * 0.4, altAboveBase);
 
   float effectiveGround = uPlanetRadius + terrainOffset * terrainBlend;
@@ -103,17 +121,38 @@ void main() {
   vec3 rayOrigin = cameraPosition;
   vec3 rayDir = normalize(vWorldDir);
 
+  // ---- Read scene depth to find where opaque terrain is ----
+  float rawDepth = texture2D(tDepth, vUv).r;
+  float sceneLinearDepth = linearizeLogDepth(rawDepth);
+
+  // Convert linear depth (view-space Z) to world-space ray distance
+  // sceneLinearDepth is the view-space Z (distance along the camera's forward axis)
+  // We need the actual ray distance: t = viewZ / dot(rayDir, cameraForward)
+  // For perspective cameras, dot(normalize(vWorldDir), cameraForward) = viewZ / rayLength
+  // Simpler: the depth buffer stores the clip-space W, which for perspective
+  // projection IS the view-space Z. The ray distance is viewZ / cos(angle).
+  float cosAngle = dot(rayDir, vec3(viewMatrix[0][2], viewMatrix[1][2], viewMatrix[2][2]));
+  float tSceneDepth = sceneLinearDepth / abs(cosAngle);
+
   // Intersect the smooth outer atmosphere sphere
   vec2 tAtmo = raySphere(rayOrigin, rayDir, uAtmoRadius);
   if (tAtmo.x > tAtmo.y) { discard; }
 
-  // Intersect base planet sphere (conservative inner bound)
+  // Intersect base planet sphere (conservative inner bound for when no depth available)
   vec2 tPlanet = raySphere(rayOrigin, rayDir, uPlanetRadius);
   bool hitPlanet = (tPlanet.x < tPlanet.y) && (tPlanet.x > 0.0);
 
   // Clamp ray segment to atmosphere shell
   float tStart = max(tAtmo.x, 0.0);
   float tEnd   = hitPlanet ? min(tPlanet.x, tAtmo.y) : tAtmo.y;
+
+  // If the depth buffer has a valid hit closer than the atmosphere sphere intersection,
+  // use it to stop the ray early (terrain mesh is blocking the view)
+  bool terrainHit = rawDepth < 1.0 && tSceneDepth < tEnd;
+  if (terrainHit) {
+    tEnd = tSceneDepth;
+  }
+
   if (tStart >= tEnd) { discard; }
 
   float segLen = tEnd - tStart;
@@ -160,7 +199,6 @@ void main() {
       float lightR = length(lightSample);
       vec3 lightDir = lightSample / lightR;
 
-      // Terrain-aware altitude for light samples
       float lightAlt = getAltitude(lightSample, lightR, lightDir);
 
       if (lightAlt < 0.0) { shadow = true; break; }
@@ -277,11 +315,15 @@ export class Atmosphere {
         uIntensity:     { value: cfg.intensity },
         uHeightMap:     { value: heightMap },
         uTerrainHeight: { value: cfg.terrainHeight },
+        // Depth buffer integration
+        tDepth:         { value: null },
+        uCameraNear:    { value: 0.5 },
+        uCameraFar:     { value: 100000 },
       },
       transparent: true,
       side: THREE.BackSide,
       depthWrite: false,
-      depthTest: true,   // respect the terrain depth buffer
+      depthTest: true,
     });
 
     const geo = new THREE.SphereGeometry(atmoRadius, cfg.segments, cfg.segments);
@@ -292,6 +334,19 @@ export class Atmosphere {
   /** Call each frame to update sun direction */
   setSunDirection(dir: THREE.Vector3): void {
     (this.material.uniforms['uSunDir'].value as THREE.Vector3).copy(dir);
+  }
+
+  /** Pass the depth texture from the opaque pass */
+  setDepthTexture(depthTex: THREE.DepthTexture): void {
+    this.material.uniforms['tDepth'].value = depthTex;
+  }
+
+  /** Update camera near/far each frame so logarithmic depth reconstruction is correct */
+  updateCameraUniforms(camera: THREE.Camera): void {
+    if (camera instanceof THREE.PerspectiveCamera) {
+      this.material.uniforms['uCameraNear'].value = camera.near;
+      this.material.uniforms['uCameraFar'].value = camera.far;
+    }
   }
 
   dispose(): void {

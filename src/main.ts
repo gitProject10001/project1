@@ -6,13 +6,31 @@ import { CameraControls } from './CameraControls';
 // Scene bootstrap
 // ---------------------------------------------------------------------------
 
-const renderer = new THREE.WebGLRenderer({ antialias: true });
+const renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.0;
 document.body.appendChild(renderer.domElement);
+
+// ---------------------------------------------------------------------------
+// Depth-texture render target for hybrid pipeline
+// ---------------------------------------------------------------------------
+
+function createDepthTarget(w: number, h: number): THREE.WebGLRenderTarget {
+  const dpr = renderer.getPixelRatio();
+  const target = new THREE.WebGLRenderTarget(w * dpr, h * dpr, {
+    minFilter: THREE.NearestFilter,
+    magFilter: THREE.NearestFilter,
+    type: THREE.FloatType,
+  });
+  target.depthTexture = new THREE.DepthTexture(w * dpr, h * dpr);
+  target.depthTexture.type = THREE.FloatType;
+  return target;
+}
+
+let depthTarget = createDepthTarget(window.innerWidth, window.innerHeight);
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x000005);
@@ -39,6 +57,7 @@ const controls = new CameraControls(camera, renderer.domElement);
 // ---------------------------------------------------------------------------
 
 const sunDir = new THREE.Vector3(1, 0.5, 0.8).normalize();
+
 const sunLight = new THREE.DirectionalLight(0xfff5e0, 2.0);
 sunLight.position.copy(sunDir.clone().multiplyScalar(10000));
 scene.add(sunLight);
@@ -101,6 +120,9 @@ scene.add(planet.group);
 
 // Pass sun direction to the atmosphere shader
 planet.atmosphere.setSunDirection(sunDir);
+planet.atmosphere.setDepthTexture(depthTarget.depthTexture!);
+planet.ocean.setSunDirection(sunDir);
+planet.ocean.setDepthTexture(depthTarget.depthTexture!);
 
 // ---------------------------------------------------------------------------
 // HUD
@@ -129,6 +151,12 @@ window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
+
+  // Rebuild depth target at new resolution
+  depthTarget.dispose();
+  depthTarget = createDepthTarget(window.innerWidth, window.innerHeight);
+  planet.atmosphere.setDepthTexture(depthTarget.depthTexture!);
+  planet.ocean.setDepthTexture(depthTarget.depthTexture!);
 });
 
 // ---------------------------------------------------------------------------
@@ -173,7 +201,24 @@ function animate(): void {
   // Update planet LOD
   planet.update(camera);
 
-  // Render
+  // Update camera-dependent uniforms for volumetric shaders
+  planet.atmosphere.updateCameraUniforms(camera);
+  planet.ocean.updateCameraUniforms(camera);
+
+  // ---------------------------------------------------------------------------
+  // Two-pass hybrid pipeline
+  // ---------------------------------------------------------------------------
+
+  // Pass 1: Render opaque terrain into the depth target
+  planet.atmosphere.mesh.visible = false;
+  planet.ocean.mesh.visible = false;
+  renderer.setRenderTarget(depthTarget);
+  renderer.render(scene, camera);
+  renderer.setRenderTarget(null);
+
+  // Pass 2: Render everything (volumetric shaders now read the depth texture)
+  planet.atmosphere.mesh.visible = true;
+  planet.ocean.mesh.visible = true;
   renderer.render(scene, camera);
 
   // HUD

@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { SimplexNoise3D } from './SimplexNoise';
 import { Atmosphere } from './Atmosphere';
+import { Ocean } from './Ocean';
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -487,25 +488,10 @@ function buildHeightCubemap(resolution: number): THREE.CubeTexture {
 }
 
 // ---------------------------------------------------------------------------
-// Ocean
+// Ocean — now uses volumetric shader from Ocean.ts
 // ---------------------------------------------------------------------------
 
-function createOcean(): THREE.Mesh {
-  const oceanRadius = PLANET_RADIUS + OCEAN_LEVEL * TERRAIN_HEIGHT;
-  const geo = new THREE.SphereGeometry(oceanRadius, 128, 128);
-  const mat = new THREE.MeshPhongMaterial({
-    color: 0x0a2a4a,
-    specular: 0x556677,
-    shininess: 100,
-    transparent: true,
-    opacity: 0.8,
-    depthWrite: true,
-    polygonOffset: true,
-    polygonOffsetFactor: 2,
-    polygonOffsetUnits: 2,
-  });
-  return new THREE.Mesh(geo, mat);
-}
+const OCEAN_RADIUS = PLANET_RADIUS + OCEAN_LEVEL * TERRAIN_HEIGHT;
 
 // ---------------------------------------------------------------------------
 // Planet
@@ -522,7 +508,7 @@ export class Planet {
   group: THREE.Group;
   private roots: QuadNode[] = [];
   readonly atmosphere: Atmosphere;
-  private ocean: THREE.Mesh;
+  readonly ocean: Ocean;
   private leafMeshes = new Set<THREE.Mesh>();
   private frustum = new THREE.Frustum();
   private projScreenMatrix = new THREE.Matrix4();
@@ -535,9 +521,11 @@ export class Planet {
     for (let face = 0; face < 6; face++) {
       this.roots.push(new QuadNode({ face, uMin: 0, vMin: 0, size: 1 }, 0));
     }
-    this.ocean = createOcean();
-    this.ocean.renderOrder = 0;
-    this.group.add(this.ocean);
+    this.ocean = new Ocean({
+      planetRadius: PLANET_RADIUS,
+      oceanRadius: OCEAN_RADIUS,
+    });
+    this.group.add(this.ocean.mesh);
 
     // Build terrain heightmap cubemap for atmosphere ground-following
     const heightCube = buildHeightCubemap(256);
@@ -615,7 +603,6 @@ export class Planet {
   dispose(): void {
     for (const root of this.roots) root.dispose();
     this.atmosphere.dispose();
-    this.ocean.geometry.dispose();
-    (this.ocean.material as THREE.Material).dispose();
+    this.ocean.dispose();
   }
 }
