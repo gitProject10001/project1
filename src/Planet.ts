@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { SimplexNoise3D } from './SimplexNoise';
 import { Atmosphere } from './Atmosphere';
 import { Ocean } from './Ocean';
+import { Clouds } from './Clouds';
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -509,6 +510,7 @@ export class Planet {
   private roots: QuadNode[] = [];
   readonly atmosphere: Atmosphere;
   readonly ocean: Ocean;
+  readonly clouds: Clouds;
   private leafMeshes = new Set<THREE.Mesh>();
   private frustum = new THREE.Frustum();
   private projScreenMatrix = new THREE.Matrix4();
@@ -535,6 +537,12 @@ export class Planet {
       heightCubemap: heightCube,
     });
     this.group.add(this.atmosphere.mesh);
+
+    this.clouds = new Clouds({
+      planetRadius: PLANET_RADIUS,
+      terrainHeight: TERRAIN_HEIGHT,
+    });
+    this.group.add(this.clouds.mesh);
   }
 
   update(camera: THREE.Camera): void {
@@ -604,5 +612,6 @@ export class Planet {
     for (const root of this.roots) root.dispose();
     this.atmosphere.dispose();
     this.ocean.dispose();
+    this.clouds.dispose();
   }
 }

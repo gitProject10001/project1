@@ -323,7 +323,7 @@ export class Atmosphere {
       transparent: true,
       side: THREE.BackSide,
       depthWrite: false,
-      depthTest: true,
+      depthTest: false,
     });
 
     const geo = new THREE.SphereGeometry(atmoRadius, cfg.segments, cfg.segments);

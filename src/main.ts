@@ -123,6 +123,8 @@ planet.atmosphere.setSunDirection(sunDir);
 planet.atmosphere.setDepthTexture(depthTarget.depthTexture!);
 planet.ocean.setSunDirection(sunDir);
 planet.ocean.setDepthTexture(depthTarget.depthTexture!);
+planet.clouds.setSunDirection(sunDir);
+planet.clouds.setDepthTexture(depthTarget.depthTexture!);
 
 // ---------------------------------------------------------------------------
 // HUD
@@ -157,6 +159,7 @@ window.addEventListener('resize', () => {
   depthTarget = createDepthTarget(window.innerWidth, window.innerHeight);
   planet.atmosphere.setDepthTexture(depthTarget.depthTexture!);
   planet.ocean.setDepthTexture(depthTarget.depthTexture!);
+  planet.clouds.setDepthTexture(depthTarget.depthTexture!);
 });
 
 // ---------------------------------------------------------------------------
@@ -204,6 +207,8 @@ function animate(): void {
   // Update camera-dependent uniforms for volumetric shaders
   planet.atmosphere.updateCameraUniforms(camera);
   planet.ocean.updateCameraUniforms(camera);
+  planet.clouds.updateCameraUniforms(camera);
+  planet.clouds.updateTime(clock.elapsedTime);
 
   // ---------------------------------------------------------------------------
   // Two-pass hybrid pipeline
@@ -212,6 +217,7 @@ function animate(): void {
   // Pass 1: Render opaque terrain into the depth target
   planet.atmosphere.mesh.visible = false;
   planet.ocean.mesh.visible = false;
+  planet.clouds.mesh.visible = false;
   renderer.setRenderTarget(depthTarget);
   renderer.render(scene, camera);
   renderer.setRenderTarget(null);
@@ -219,6 +225,7 @@ function animate(): void {
   // Pass 2: Render everything (volumetric shaders now read the depth texture)
   planet.atmosphere.mesh.visible = true;
   planet.ocean.mesh.visible = true;
+  planet.clouds.mesh.visible = true;
   renderer.render(scene, camera);
 
   // HUD
