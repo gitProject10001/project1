@@ -292,6 +292,18 @@ void main() {
   float stepSize = segLen / float(NUM_STEPS);
   tStart += jitter * stepSize;
 
+  // ---- Density scaling for long ray paths ----
+  // When viewing from orbit, the ray can traverse the entire cloud shell
+  // diameter. Without compensation, density accumulates into an opaque
+  // grey blanket. We scale down per-sample density when the total path
+  // length greatly exceeds the shell thickness so individual cloud
+  // features remain visible from any angle.
+  float shellThickness = uOuterRadius - uInnerRadius;
+  float pathRatio = segLen / shellThickness;
+  // For a grazing ray (pathRatio ~ 1) densityScale = 1.0
+  // For a full-diameter ray (pathRatio ~ 40+) densityScale ~ 0.15
+  float densityScale = shellThickness / max(segLen, shellThickness);
+
   // ---- Phase function for view-sun angle ----
   float cosTheta = dot(rayDir, uSunDir);
   // Dual-lobe: blend isotropic + strong forward scatter for silver lining
@@ -310,7 +322,7 @@ void main() {
     if (t > tEnd) break;
 
     vec3 samplePos = rayOrigin + rayDir * t;
-    float density = sampleCloudDensity(samplePos);
+    float density = sampleCloudDensity(samplePos) * densityScale;
 
     if (density > 0.001) {
       // Beer's Law: transmittance loss through this step
@@ -323,7 +335,6 @@ void main() {
       // Beer-powder: blend between Beer's law and powder effect based
       // on how aligned the view is with the sun. This prevents the
       // powder term from darkening the sun-facing side of clouds.
-      float beer = sampleTransmittance;
       float powder = 1.0 - exp(-density * stepSize * 2.0);
       // On the sun-facing side (cosTheta > 0), use mostly Beer's law
       // On the shadow side, blend in the powder for silver-lining
@@ -332,8 +343,11 @@ void main() {
       // In-scattered light at this sample
       vec3 sunLight = uCloudColor * uSunIntensity * sunTransmittance * phase * beerPowder;
 
-      // Ambient/sky fill — always contributes regardless of sun visibility
-      vec3 ambient = uCloudShadowColor * (0.6 + 0.4 * sunTransmittance);
+      // Ambient/sky fill — modulated by how much this part of the
+      // planet faces the sun. On the night side, ambient drops to near zero.
+      vec3 sampleDir = normalize(samplePos);
+      float dayFactor = smoothstep(-0.1, 0.3, dot(sampleDir, uSunDir));
+      vec3 ambient = uCloudShadowColor * (dayFactor * 0.5 + 0.05);
 
       vec3 lightColor = sunLight + ambient;
 
