@@ -220,7 +220,8 @@ float lightMarch(vec3 pos) {
   if (inShadow) return 0.0; // No direct sunlight
 
   // Beer's Law: transmittance through the cloud toward the sun
-  return exp(-tau * 1.5);
+  // Use a gentler absorption coefficient so sun-facing clouds stay bright
+  return exp(-tau * 0.6);
 }
 
 // =====================================================================
@@ -319,13 +320,22 @@ void main() {
       // Light reaching this sample from the sun
       float sunTransmittance = lightMarch(samplePos);
 
-      // Powder effect: enhances brightness at thin cloud edges
-      // when light enters from behind (silver lining)
+      // Beer-powder: blend between Beer's law and powder effect based
+      // on how aligned the view is with the sun. This prevents the
+      // powder term from darkening the sun-facing side of clouds.
+      float beer = sampleTransmittance;
       float powder = 1.0 - exp(-density * stepSize * 2.0);
+      // On the sun-facing side (cosTheta > 0), use mostly Beer's law
+      // On the shadow side, blend in the powder for silver-lining
+      float beerPowder = mix(powder, 1.0, 0.5 + 0.5 * cosTheta);
 
       // In-scattered light at this sample
-      vec3 lightColor = uCloudColor * uSunIntensity * sunTransmittance * phase * powder
-                      + uCloudShadowColor * 0.3;  // ambient fill
+      vec3 sunLight = uCloudColor * uSunIntensity * sunTransmittance * phase * beerPowder;
+
+      // Ambient/sky fill — always contributes regardless of sun visibility
+      vec3 ambient = uCloudShadowColor * (0.6 + 0.4 * sunTransmittance);
+
+      vec3 lightColor = sunLight + ambient;
 
       // Energy-conserving integration (Sebastien Hillaire 2016)
       vec3 integScatter = lightColor * (1.0 - sampleTransmittance);
