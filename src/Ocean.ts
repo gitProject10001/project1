@@ -218,6 +218,22 @@ export class Ocean {
     this.mesh.renderOrder = 0;
   }
 
+  /** Set a uniform value by name */
+  setUniform(name: string, value: number | THREE.Vector3): void {
+    const u = this.material.uniforms[name];
+    if (!u) return;
+    if (value instanceof THREE.Vector3) {
+      (u.value as THREE.Vector3).copy(value);
+    } else {
+      u.value = value;
+    }
+  }
+
+  /** Get current uniform value */
+  getUniform(name: string): unknown {
+    return this.material.uniforms[name]?.value;
+  }
+
   setSunDirection(dir: THREE.Vector3): void {
     (this.material.uniforms['uSunDir'].value as THREE.Vector3).copy(dir);
   }

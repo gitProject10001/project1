@@ -5,16 +5,16 @@ import { Ocean } from './Ocean';
 import { Clouds } from './Clouds';
 
 // ---------------------------------------------------------------------------
-// Configuration
+// Configuration (mutable for GUI)
 // ---------------------------------------------------------------------------
 
-const PLANET_RADIUS = 1000;
-const TERRAIN_HEIGHT = 80;
-const OCEAN_LEVEL = 0.32;
-const MAX_LOD = 8;
-const PATCH_SEGMENTS = 32;
-const SPLIT_DISTANCE_FACTOR = 2.0;
-const EDGE_OVERLAP = 0.5;
+let PLANET_RADIUS = 1000;
+let TERRAIN_HEIGHT = 80;
+let OCEAN_LEVEL = 0.32;
+let MAX_LOD = 8;
+let PATCH_SEGMENTS = 32;
+let SPLIT_DISTANCE_FACTOR = 2.0;
+let EDGE_OVERLAP = 0.5;
 
 // =========================================================================
 //  TERRAIN NOISE PIPELINE
@@ -52,82 +52,72 @@ const noise = new SimplexNoise3D(12345);
 // Second noise instance with different seed for uncorrelated mountain layer
 const noiseB = new SimplexNoise3D(67890);
 
-// --- Tweakable terrain knobs ---
+// --- Tweakable terrain knobs (mutable for GUI) ---
 
-/** Base continent frequency — lower = bigger continents */
-const CONTINENT_SCALE = 0.8;
-/** Continental FBM: 5 octaves, lacunarity 2.0, persistence 0.45 (smooth) */
-const CONTINENT_OCTAVES = 5;
-const CONTINENT_LACUNARITY = 2.0;
-const CONTINENT_PERSISTENCE = 0.45;
-
-/** Mountain frequency relative to continents */
-const MOUNTAIN_SCALE = 2.4;
-/** Ridged MF: 6 octaves, lac 2.2 (slightly busier), gain 0.55 (prominent ridges) */
-const MOUNTAIN_OCTAVES = 6;
-const MOUNTAIN_LACUNARITY = 2.2;
-const MOUNTAIN_GAIN = 0.55;
-const MOUNTAIN_SHARPNESS = 2.0;
-/** How much mountain layer contributes (0-1) */
-const MOUNTAIN_STRENGTH = 0.45;
-
-/** Fine detail frequency */
-const DETAIL_SCALE = 6.0;
-/** Detail FBM: 4 octaves, lac 2.5 (busy), persistence 0.4 */
-const DETAIL_OCTAVES = 4;
-const DETAIL_LACUNARITY = 2.5;
-const DETAIL_PERSISTENCE = 0.4;
-const DETAIL_STRENGTH = 0.08;
-
-/** Erosion power curve: >1 flattens lowlands, keeps peaks.
- *  1.0 = linear (no change), 2.0 = strong flattening, 1.6 = moderate. */
-const EROSION_POWER = 1.8;
+/** Exported terrain config for GUI access */
+export const terrainConfig = {
+  continentScale: 0.8,
+  continentOctaves: 5,
+  continentLacunarity: 2.0,
+  continentPersistence: 0.45,
+  mountainScale: 2.4,
+  mountainOctaves: 6,
+  mountainLacunarity: 2.2,
+  mountainGain: 0.55,
+  mountainSharpness: 2.0,
+  mountainStrength: 0.45,
+  detailScale: 6.0,
+  detailOctaves: 4,
+  detailLacunarity: 2.5,
+  detailPersistence: 0.4,
+  detailStrength: 0.08,
+  erosionPower: 1.8,
+  get terrainHeight() { return TERRAIN_HEIGHT; },
+  set terrainHeight(v: number) { TERRAIN_HEIGHT = v; },
+  get oceanLevel() { return OCEAN_LEVEL; },
+  set oceanLevel(v: number) { OCEAN_LEVEL = v; },
+};
 
 /**
  * Sample final terrain height at a unit-sphere direction.
  * Returns a value in [0, 1] representing normalised elevation.
  */
 function sampleHeight(dir: THREE.Vector3): number {
-  const cx = dir.x * CONTINENT_SCALE;
-  const cy = dir.y * CONTINENT_SCALE;
-  const cz = dir.z * CONTINENT_SCALE;
+  const tc = terrainConfig;
+  const cx = dir.x * tc.continentScale;
+  const cy = dir.y * tc.continentScale;
+  const cz = dir.z * tc.continentScale;
 
   // --- Stage 1: Continental base ---
-  // FBM in [-1,1] → remap to [0,1]
-  const continentRaw = noise.fbm(cx, cy, cz, CONTINENT_OCTAVES, CONTINENT_LACUNARITY, CONTINENT_PERSISTENCE);
-  const continent = continentRaw * 0.5 + 0.5;   // [0, 1]
+  const continentRaw = noise.fbm(cx, cy, cz, tc.continentOctaves, tc.continentLacunarity, tc.continentPersistence);
+  const continent = continentRaw * 0.5 + 0.5;
 
   // --- Stage 2: Mountain ridges (masked to land only) ---
-  // landMask: 0 underwater, ramps 0→1 from sea level to well above
   const landMask = smoothstep(OCEAN_LEVEL - 0.02, OCEAN_LEVEL + 0.15, continent);
 
-  const mx = dir.x * MOUNTAIN_SCALE;
-  const my = dir.y * MOUNTAIN_SCALE;
-  const mz = dir.z * MOUNTAIN_SCALE;
-  const ridgeRaw = noiseB.ridgedMF(mx, my, mz, MOUNTAIN_OCTAVES, MOUNTAIN_LACUNARITY, MOUNTAIN_GAIN, MOUNTAIN_SHARPNESS);
-  // ridgedMF returns roughly [0, 2+], normalise to [0, 1]
+  const mx = dir.x * tc.mountainScale;
+  const my = dir.y * tc.mountainScale;
+  const mz = dir.z * tc.mountainScale;
+  const ridgeRaw = noiseB.ridgedMF(mx, my, mz, tc.mountainOctaves, tc.mountainLacunarity, tc.mountainGain, tc.mountainSharpness);
   const ridge = Math.min(ridgeRaw * 0.5, 1.0);
-
-  const mountains = ridge * landMask * MOUNTAIN_STRENGTH;
+  const mountains = ridge * landMask * tc.mountainStrength;
 
   // --- Stage 3: Fine detail (also masked) ---
-  const dx = dir.x * DETAIL_SCALE;
-  const dy = dir.y * DETAIL_SCALE;
-  const dz = dir.z * DETAIL_SCALE;
-  const detailRaw = noise.fbm(dx, dy, dz, DETAIL_OCTAVES, DETAIL_LACUNARITY, DETAIL_PERSISTENCE);
-  const detail = detailRaw * landMask * DETAIL_STRENGTH;
+  const dx = dir.x * tc.detailScale;
+  const dy = dir.y * tc.detailScale;
+  const dz = dir.z * tc.detailScale;
+  const detailRaw = noise.fbm(dx, dy, dz, tc.detailOctaves, tc.detailLacunarity, tc.detailPersistence);
+  const detail = detailRaw * landMask * tc.detailStrength;
 
   // --- Combine ---
   let h = continent + mountains + detail;
-  // Clamp to [0, 1] before power curve
   h = Math.max(0, Math.min(h, 1));
 
   // --- Stage 4: Power redistribution (erosion) ---
-  // Apply power curve only above sea level so ocean floor stays flat
   if (h > OCEAN_LEVEL) {
-    const aboveSea = (h - OCEAN_LEVEL) / (1.0 - OCEAN_LEVEL);    // [0,1] above sea
-    const eroded = Math.pow(aboveSea, EROSION_POWER);              // flatten lows, keep highs
-    h = OCEAN_LEVEL + eroded * (1.0 - OCEAN_LEVEL);               // map back
+    const aboveSea = (h - OCEAN_LEVEL) / (1.0 - OCEAN_LEVEL);
+    const eroded = Math.pow(aboveSea, tc.erosionPower);
+    h = OCEAN_LEVEL + eroded * (1.0 - OCEAN_LEVEL);
   }
 
   return h;
@@ -543,6 +533,32 @@ export class Planet {
       terrainHeight: TERRAIN_HEIGHT,
     });
     this.group.add(this.clouds.mesh);
+  }
+
+  /** Force full terrain rebuild (call after changing terrainConfig) */
+  regenerateTerrain(): void {
+    // Dispose all existing patches
+    for (const root of this.roots) root.dispose();
+    this.roots.length = 0;
+    for (const mesh of this.leafMeshes) {
+      mesh.geometry.dispose();
+      mesh.removeFromParent();
+    }
+    this.leafMeshes.clear();
+
+    // Rebuild quad tree roots
+    for (let face = 0; face < 6; face++) {
+      this.roots.push(new QuadNode({ face, uMin: 0, vMin: 0, size: 1 }, 0));
+    }
+
+    // Rebuild heightmap cubemap for atmosphere
+    const heightCube = buildHeightCubemap(256);
+    this.atmosphere.material.uniforms['uHeightMap'].value = heightCube;
+    this.atmosphere.material.uniforms['uTerrainHeight'].value = TERRAIN_HEIGHT;
+
+    // Update ocean radius
+    const newOceanRadius = PLANET_RADIUS + OCEAN_LEVEL * TERRAIN_HEIGHT;
+    this.ocean.material.uniforms['uOceanRadius'].value = newOceanRadius;
   }
 
   update(camera: THREE.Camera): void {

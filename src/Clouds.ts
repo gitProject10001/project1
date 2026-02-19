@@ -203,11 +203,21 @@ float lightMarch(vec3 pos) {
   float sunStep = sunPathLen / float(NUM_LIGHT_STEPS);
 
   float tau = 0.0;
+  bool inShadow = false;
   for (int j = 0; j < NUM_LIGHT_STEPS; j++) {
     float t = (float(j) + 0.5) * sunStep;
     vec3 lightSample = pos + uSunDir * t;
+
+    // Check if light ray goes through the planet
+    if (length(lightSample) < uInnerRadius) {
+      inShadow = true;
+      break;
+    }
+
     tau += sampleCloudDensity(lightSample) * sunStep;
   }
+
+  if (inShadow) return 0.0; // No direct sunlight
 
   // Beer's Law: transmittance through the cloud toward the sun
   return exp(-tau * 1.5);
@@ -370,7 +380,7 @@ const DEFAULT_CLOUD_CONFIG: CloudConfig = {
   cloudSpeed: 0.3,
   sunIntensity: 22.0,
   cloudColor: new THREE.Vector3(1.0, 0.98, 0.95),
-  cloudShadowColor: new THREE.Vector3(0.15, 0.18, 0.28),
+  cloudShadowColor: new THREE.Vector3(0.2, 0.22, 0.25), // More neutral grey/blue for ambient light
   segments: 80,
   terrainHeight: 80,
 };
@@ -425,6 +435,22 @@ export class Clouds {
     const geo = new THREE.SphereGeometry(geoRadius, cfg.segments, cfg.segments);
     this.mesh = new THREE.Mesh(geo, this.material);
     this.mesh.renderOrder = 3; // After atmosphere (2), after ocean (0), after terrain (1)
+  }
+
+  /** Set a uniform value by name */
+  setUniform(name: string, value: number | THREE.Vector3): void {
+    const u = this.material.uniforms[name];
+    if (!u) return;
+    if (value instanceof THREE.Vector3) {
+      (u.value as THREE.Vector3).copy(value);
+    } else {
+      u.value = value;
+    }
+  }
+
+  /** Get current uniform value */
+  getUniform(name: string): unknown {
+    return this.material.uniforms[name]?.value;
   }
 
   /** Call each frame to update sun direction */

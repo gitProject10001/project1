@@ -341,6 +341,22 @@ export class Atmosphere {
     this.material.uniforms['tDepth'].value = depthTex;
   }
 
+  /** Set a uniform value by name */
+  setUniform(name: string, value: number | THREE.Vector3): void {
+    const u = this.material.uniforms[name];
+    if (!u) return;
+    if (value instanceof THREE.Vector3) {
+      (u.value as THREE.Vector3).copy(value);
+    } else {
+      u.value = value;
+    }
+  }
+
+  /** Get current uniform value */
+  getUniform(name: string): unknown {
+    return this.material.uniforms[name]?.value;
+  }
+
   /** Update camera near/far each frame so logarithmic depth reconstruction is correct */
   updateCameraUniforms(camera: THREE.Camera): void {
     if (camera instanceof THREE.PerspectiveCamera) {
