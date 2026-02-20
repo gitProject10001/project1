@@ -398,7 +398,7 @@ export interface CloudConfig {
 const DEFAULT_CLOUD_CONFIG: CloudConfig = {
   planetRadius: 1000,
   cloudBaseOffset: 45,        // clouds start 45 units above surface (above most terrain)
-  cloudThickness: 25,         // 25 units thick shell
+  cloudThickness: 50,         // 25 units thick shell
   coverage: 0.55,             // moderate coverage
   densityMultiplier: 0.8,
   cloudSpeed: 0.3,
@@ -448,6 +448,11 @@ export class Clouds {
       side: THREE.BackSide,
       depthWrite: false,
       depthTest: false,  // All occlusion handled analytically via tDepth
+      // Premultiplied alpha: luminance is added, background is dimmed by (1 - alpha)
+      blending: THREE.CustomBlending,
+      blendSrc: THREE.OneFactor,
+      blendDst: THREE.OneMinusSrcAlphaFactor,
+      blendEquation: THREE.AddEquation,
     });
 
     // Use a sphere larger than the atmosphere so the BackSide faces always

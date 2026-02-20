@@ -224,14 +224,19 @@ void main() {
   // In-scattered light
   vec3 scatter = uIntensity * (pR * uRayleighCoeff * totalR + pM * uMieCoeff * totalM);
 
-  // Alpha: based on how much atmosphere the ray passed through
-  float totalOD = length(uRayleighCoeff) * opticalDepthR + uMieCoeff * opticalDepthM;
-  float alpha = 1.0 - exp(-totalOD * 1.5);
-  alpha = max(alpha, 0.0);
+  // Transmittance: how much background light survives through the atmosphere
+  vec3 totalTau = uRayleighCoeff * opticalDepthR + uMieCoeff * opticalDepthM;
+  vec3 transmittanceRGB = exp(-totalTau * 1.5);
+
+  // Use luminance of transmittance for scalar alpha
+  float transmittance = dot(transmittanceRGB, vec3(0.2126, 0.7152, 0.0722));
+  float alpha = 1.0 - transmittance;
 
   // Tone-map scatter to prevent blow-out around sun
   scatter = 1.0 - exp(-scatter);
 
+  // Premultiplied alpha: scatter is already the "add" component,
+  // alpha controls how much the background is dimmed
   gl_FragColor = vec4(scatter, alpha);
 }
 `;
@@ -324,6 +329,11 @@ export class Atmosphere {
       side: THREE.BackSide,
       depthWrite: false,
       depthTest: false,
+      // Premultiplied alpha: scatter is added, background is dimmed by (1 - alpha)
+      blending: THREE.CustomBlending,
+      blendSrc: THREE.OneFactor,
+      blendDst: THREE.OneMinusSrcAlphaFactor,
+      blendEquation: THREE.AddEquation,
     });
 
     const geo = new THREE.SphereGeometry(atmoRadius, cfg.segments, cfg.segments);

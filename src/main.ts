@@ -119,13 +119,14 @@ scene.add(createStarfield());
 const planet = new Planet();
 scene.add(planet.group);
 
-// Pass sun direction to the atmosphere shader
+// Pass sun direction to shaders
 planet.atmosphere.setSunDirection(sunDir);
 planet.atmosphere.setDepthTexture(depthTarget.depthTexture!);
 planet.ocean.setSunDirection(sunDir);
 planet.ocean.setDepthTexture(depthTarget.depthTexture!);
 planet.clouds.setSunDirection(sunDir);
 planet.clouds.setDepthTexture(depthTarget.depthTexture!);
+planet.setTerrainSunDirection(sunDir);
 
 // ---------------------------------------------------------------------------
 // GUI – Real-time parameter controls
@@ -213,11 +214,11 @@ gui.addCard({
   icon: '\u2601',
   sliders: [
     { label: 'Coverage', key: 'cloudCoverage', min: 0.0, max: 1.0, step: 0.01, value: 0.55,
-      onChange: v => planet.clouds.setUniform('uCoverage', v) },
+      onChange: v => { planet.clouds.setUniform('uCoverage', v); planet.syncTerrainCloudParams(); } },
     { label: 'Density', key: 'cloudDensity', min: 0.1, max: 3.0, step: 0.05, value: 0.8,
-      onChange: v => planet.clouds.setUniform('uDensityMult', v) },
+      onChange: v => { planet.clouds.setUniform('uDensityMult', v); planet.syncTerrainCloudParams(); } },
     { label: 'Speed', key: 'cloudSpeed', min: 0.0, max: 2.0, step: 0.05, value: 0.3,
-      onChange: v => planet.clouds.setUniform('uCloudSpeed', v) },
+      onChange: v => { planet.clouds.setUniform('uCloudSpeed', v); planet.syncTerrainCloudParams(); } },
     { label: 'Sun Intensity', key: 'cloudSunInt', min: 0, max: 60, step: 0.5, value: 22.0,
       onChange: v => planet.clouds.setUniform('uSunIntensity', v) },
   ],
@@ -276,6 +277,7 @@ gui.addCard({
         planet.atmosphere.setSunDirection(sunDir);
         planet.ocean.setSunDirection(sunDir);
         planet.clouds.setSunDirection(sunDir);
+        planet.setTerrainSunDirection(sunDir);
       } },
     { label: 'Sun Dir Y', key: 'sunY', min: -1, max: 1, step: 0.01, value: sunDir.y,
       onChange: v => {
@@ -284,6 +286,7 @@ gui.addCard({
         planet.atmosphere.setSunDirection(sunDir);
         planet.ocean.setSunDirection(sunDir);
         planet.clouds.setSunDirection(sunDir);
+        planet.setTerrainSunDirection(sunDir);
       } },
     { label: 'Sun Dir Z', key: 'sunZ', min: -1, max: 1, step: 0.01, value: sunDir.z,
       onChange: v => {
@@ -292,6 +295,7 @@ gui.addCard({
         planet.atmosphere.setSunDirection(sunDir);
         planet.ocean.setSunDirection(sunDir);
         planet.clouds.setSunDirection(sunDir);
+        planet.setTerrainSunDirection(sunDir);
       } },
     { label: 'Sun Intensity', key: 'sunLightInt', min: 0, max: 5, step: 0.1, value: 2.0,
       onChange: v => { sunLight.intensity = v; } },
@@ -411,6 +415,10 @@ function animate(): void {
   planet.ocean.updateCameraUniforms(camera);
   planet.clouds.updateCameraUniforms(camera);
   planet.clouds.updateTime(clock.elapsedTime);
+
+  // Update terrain cloud shadow params
+  planet.updateTerrainTime(clock.elapsedTime);
+  planet.syncTerrainCloudParams();
 
   // ---------------------------------------------------------------------------
   // Two-pass hybrid pipeline

@@ -485,8 +485,81 @@ function buildHeightCubemap(resolution: number): THREE.CubeTexture {
 const OCEAN_RADIUS = PLANET_RADIUS + OCEAN_LEVEL * TERRAIN_HEIGHT;
 
 // ---------------------------------------------------------------------------
-// Planet
+// Terrain Shader with Cloud Shadows
 // ---------------------------------------------------------------------------
+
+// Cloud shadow GLSL code — injected into MeshPhongMaterial via onBeforeCompile
+const CLOUD_SHADOW_UNIFORMS_GLSL = /* glsl */ `
+uniform vec3  uCloudSunDir;
+uniform float uCloudInnerRadius;
+uniform float uCloudOuterRadius;
+uniform float uCloudCoverage;
+uniform float uCloudDensityMult;
+uniform float uCloudSpeed;
+uniform float uCloudTime;
+`;
+
+const CLOUD_SHADOW_FUNCTIONS_GLSL = /* glsl */ `
+float csHash3(vec3 p) {
+  p = fract(p * vec3(443.8975, 397.2973, 491.1871));
+  p += dot(p, p.yxz + 19.19);
+  return fract((p.x + p.y) * p.z);
+}
+float csValueNoise3D(vec3 p) {
+  vec3 i = floor(p);
+  vec3 f = fract(p);
+  vec3 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+  return mix(mix(mix(csHash3(i+vec3(0,0,0)), csHash3(i+vec3(1,0,0)), u.x),
+                 mix(csHash3(i+vec3(0,1,0)), csHash3(i+vec3(1,1,0)), u.x), u.y),
+             mix(mix(csHash3(i+vec3(0,0,1)), csHash3(i+vec3(1,0,1)), u.x),
+                 mix(csHash3(i+vec3(0,1,1)), csHash3(i+vec3(1,1,1)), u.x), u.y), u.z);
+}
+float csFBM(vec3 p) {
+  float v = 0.0, a = 0.5, f = 1.0, t = 0.0;
+  for (int i = 0; i < 4; i++) { v += a * csValueNoise3D(p * f); t += a; a *= 0.5; f *= 2.3; }
+  return v / t;
+}
+vec2 csRaySphere(vec3 ro, vec3 rd, float radius) {
+  float b = dot(ro, rd);
+  float c = dot(ro, ro) - radius * radius;
+  float d = b * b - c;
+  if (d < 0.0) return vec2(1e20, -1e20);
+  float s = sqrt(d);
+  return vec2(-b - s, -b + s);
+}
+float csSampleDensity(vec3 pos) {
+  float r = length(pos);
+  float hf = clamp((r - uCloudInnerRadius) / (uCloudOuterRadius - uCloudInnerRadius), 0.0, 1.0);
+  float hg = smoothstep(0.0, 0.15, hf) * smoothstep(1.0, 0.65, hf);
+  vec3 np = pos * 0.008 + vec3(uCloudTime * uCloudSpeed * 0.7, 0.0, uCloudTime * uCloudSpeed);
+  float sh = csFBM(np);
+  float dt = csFBM(np * 3.0 + vec3(37.0));
+  float dn = smoothstep(1.0 - uCloudCoverage, 1.0, sh - dt * 0.35);
+  return max(dn * hg * uCloudDensityMult, 0.0);
+}
+float cloudShadow(vec3 worldPos) {
+  vec2 ti = csRaySphere(worldPos, uCloudSunDir, uCloudInnerRadius);
+  vec2 to = csRaySphere(worldPos, uCloudSunDir, uCloudOuterRadius);
+  float tS = max(ti.y, 0.0), tE = to.y;
+  if (tS >= tE || tE < 0.0) return 1.0;
+  float ss = (tE - tS) / 8.0, tau = 0.0;
+  for (int i = 0; i < 8; i++) {
+    float t = tS + (float(i) + 0.5) * ss;
+    tau += csSampleDensity(worldPos + uCloudSunDir * t) * ss;
+  }
+  return exp(-tau * 1.5);
+}
+`;
+
+const cloudShadowUniforms = {
+  uCloudSunDir:       { value: new THREE.Vector3(1, 0.5, 0.8).normalize() },
+  uCloudInnerRadius:  { value: 1045.0 },
+  uCloudOuterRadius:  { value: 1070.0 },
+  uCloudCoverage:     { value: 0.55 },
+  uCloudDensityMult:  { value: 0.8 },
+  uCloudSpeed:        { value: 0.3 },
+  uCloudTime:         { value: 0.0 },
+};
 
 const patchMaterial = new THREE.MeshPhongMaterial({
   vertexColors: true,
@@ -495,12 +568,53 @@ const patchMaterial = new THREE.MeshPhongMaterial({
   side: THREE.FrontSide,
 });
 
+// Inject cloud shadow calculation into MeshPhongMaterial
+patchMaterial.onBeforeCompile = (shader) => {
+  // Add our uniforms to the shader's uniform map
+  Object.assign(shader.uniforms, cloudShadowUniforms);
+
+  // Inject world position varying into vertex shader
+  shader.vertexShader = shader.vertexShader.replace(
+    'void main() {',
+    'varying vec3 vCloudWorldPos;\nvoid main() {'
+  );
+  // Inject after fog_vertex (last chunk that uses position) to ensure transformed is set
+  shader.vertexShader = shader.vertexShader.replace(
+    '#include <fog_vertex>',
+    '#include <fog_vertex>\nvCloudWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;'
+  );
+
+  // Inject cloud shadow functions and uniforms into fragment shader
+  shader.fragmentShader = shader.fragmentShader.replace(
+    'void main() {',
+    CLOUD_SHADOW_UNIFORMS_GLSL + '\nvarying vec3 vCloudWorldPos;\n' + CLOUD_SHADOW_FUNCTIONS_GLSL + '\nvoid main() {'
+  );
+
+  // Multiply the final output by cloud shadow factor
+  // outgoingLight is computed before <opaque_fragment>, so we inject right before it
+  shader.fragmentShader = shader.fragmentShader.replace(
+    '#include <opaque_fragment>',
+    `float cShadow = cloudShadow(vCloudWorldPos);
+    outgoingLight *= mix(0.3, 1.0, cShadow);
+    #include <opaque_fragment>`
+  );
+
+  // Store reference so we can update uniforms later
+  (patchMaterial as any)._cloudShader = shader;
+};
+
+// ---------------------------------------------------------------------------
+// Planet
+// ---------------------------------------------------------------------------
+
 export class Planet {
   group: THREE.Group;
   private roots: QuadNode[] = [];
   readonly atmosphere: Atmosphere;
   readonly ocean: Ocean;
   readonly clouds: Clouds;
+  /** @internal terrain material for cloud shadow injection */
+  private readonly _terrainMaterial = patchMaterial;
   private leafMeshes = new Set<THREE.Mesh>();
   private frustum = new THREE.Frustum();
   private projScreenMatrix = new THREE.Matrix4();
@@ -616,6 +730,26 @@ export class Planet {
 
       leaves.add(node.mesh);
     }
+  }
+
+  /** Update terrain shader sun direction */
+  setTerrainSunDirection(dir: THREE.Vector3): void {
+    (cloudShadowUniforms.uCloudSunDir.value as THREE.Vector3).copy(dir);
+  }
+
+  /** Update terrain shader time for animated cloud shadows */
+  updateTerrainTime(elapsed: number): void {
+    cloudShadowUniforms.uCloudTime.value = elapsed;
+  }
+
+  /** Sync terrain cloud shadow params with cloud settings */
+  syncTerrainCloudParams(): void {
+    const cu = this.clouds.material.uniforms;
+    cloudShadowUniforms.uCloudInnerRadius.value = cu['uInnerRadius'].value;
+    cloudShadowUniforms.uCloudOuterRadius.value = cu['uOuterRadius'].value;
+    cloudShadowUniforms.uCloudCoverage.value = cu['uCoverage'].value;
+    cloudShadowUniforms.uCloudDensityMult.value = cu['uDensityMult'].value;
+    cloudShadowUniforms.uCloudSpeed.value = cu['uCloudSpeed'].value;
   }
 
   getHeightAt(worldPos: THREE.Vector3): number {
