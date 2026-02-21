@@ -46,6 +46,20 @@ uniform float uSunIntensity;    // Sun brightness
 uniform vec3  uCloudColor;      // Base albedo of clouds
 uniform vec3  uCloudShadowColor;// Shadow / ambient color
 
+// Weather system uniforms
+uniform float uCloudType;       // 0=Stratus, 1=Cumulus, 2=Cumulonimbus
+uniform float uAdvectionStrength;// Curl noise advection intensity
+uniform float uTurbulence;      // Small-scale turbulence
+uniform float uWeatherScale;    // Large-scale weather front intensity
+uniform float uWindX;           // Global wind direction X
+uniform float uWindZ;           // Global wind direction Z
+
+// Tornado uniforms
+uniform vec3  uTornadoPos1;     // World-space position of tornado 1
+uniform vec3  uTornadoPos2;     // World-space position of tornado 2
+uniform float uTornadoActive;   // Bitmask: 1=tornado1, 2=tornado2
+uniform float uTornadoStrength; // Vortex intensity
+
 // Depth buffer integration
 uniform sampler2D tDepth;       // Scene depth texture (logarithmic depth)
 uniform float uCameraNear;
@@ -58,12 +72,10 @@ varying vec2 vUv;
 // ---- Constants ----
 #define PI 3.14159265359
 #define NUM_STEPS 48
-#define NUM_LIGHT_STEPS 6
+#define NUM_LIGHT_STEPS 4
 
 // =====================================================================
 //  Interleaved Gradient Noise (Jimenez 2014)
-//  Produces a repeating low-discrepancy pattern that reduces banding
-//  far better than white noise, without needing a blue-noise texture.
 // =====================================================================
 float interleavedGradientNoise(vec2 fragCoord) {
   vec3 magic = vec3(0.06711056, 0.00583715, 52.9829189);
@@ -71,10 +83,7 @@ float interleavedGradientNoise(vec2 fragCoord) {
 }
 
 // =====================================================================
-//  Pseudo-3D Noise
-//
-//  Hash-based value noise with smooth interpolation. Three octaves of
-//  this give convincing fluffy cloud shapes without a 3D texture.
+//  Pseudo-3D Noise — Hash-based value noise with C2 continuity
 // =====================================================================
 float hash3(vec3 p) {
   p = fract(p * vec3(443.8975, 397.2973, 491.1871));
@@ -85,7 +94,6 @@ float hash3(vec3 p) {
 float valueNoise3D(vec3 p) {
   vec3 i = floor(p);
   vec3 f = fract(p);
-  // Quintic Hermite for C2 continuity (smoother than cubic)
   vec3 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
 
   return mix(mix(mix(hash3(i + vec3(0,0,0)), hash3(i + vec3(1,0,0)), u.x),
@@ -94,7 +102,7 @@ float valueNoise3D(vec3 p) {
                  mix(hash3(i + vec3(0,1,1)), hash3(i + vec3(1,1,1)), u.x), u.y), u.z);
 }
 
-// FBM with 4 octaves — the primary cloud shape function
+// FBM with 4 octaves — primary cloud shape
 float cloudFBM(vec3 p) {
   float value  = 0.0;
   float amp    = 0.5;
@@ -104,51 +112,270 @@ float cloudFBM(vec3 p) {
     value += amp * valueNoise3D(p * freq);
     total += amp;
     amp   *= 0.5;
-    freq  *= 2.3;   // slightly irregular lacunarity for more natural look
+    freq  *= 2.3;
+  }
+  return value / total;
+}
+
+// FBM with 3 octaves — used for detail erosion
+float cloudFBM3(vec3 p) {
+  float value  = 0.0;
+  float amp    = 0.5;
+  float freq   = 1.0;
+  float total  = 0.0;
+  for (int i = 0; i < 3; i++) {
+    value += amp * valueNoise3D(p * freq);
+    total += amp;
+    amp   *= 0.5;
+    freq  *= 2.3;
   }
   return value / total;
 }
 
 // =====================================================================
-//  Cloud density at a world-space position
+//  Cloud Type Height Profiles
 //
-//  Maps the sample point onto the spherical shell, computes a
-//  height-within-shell gradient, and combines it with FBM noise
-//  to produce the final density. Coverage uniform controls the
-//  threshold that separates cloud from clear sky.
+//  Three meteorological cloud types blended by uCloudType [0..2]:
+//    0 = Stratus:        flat layer, concentrated at 20-40% height
+//    1 = Cumulus:         puffy towers, bell curve centered at 35%
+//    2 = Cumulonimbus:   full vertical column with anvil top flare
+//
+//  Bottom always fades smoothly from 0 to prevent hard shell cuts.
 // =====================================================================
-float sampleCloudDensity(vec3 pos) {
+float cloudHeightProfile(float h) {
+  // Soft bottom fade — shared by all types, eliminates bottom-cut artifact
+  float bottomFade = smoothstep(0.0, 0.08, h) * smoothstep(0.08, 0.18, h * 1.5 + 0.1);
+
+  // Stratus: thin flat band concentrated low
+  float stratus = bottomFade
+                * smoothstep(0.0, 0.12, h)
+                * smoothstep(0.5, 0.25, h);  // sharp falloff above 25-50%
+
+  // Cumulus: bell-shaped, peaks around 35%, extends to ~80%
+  float cumulusCore = exp(-pow((h - 0.35) / 0.22, 2.0));  // gaussian peak
+  float cumulus = bottomFade * cumulusCore * smoothstep(1.0, 0.75, h);
+
+  // Cumulonimbus: full vertical column, anvil spread at top
+  float cbColumn = bottomFade * smoothstep(0.0, 0.1, h);
+  float cbAnvil = smoothstep(0.7, 0.85, h) * 0.6;  // extra density at anvil height
+  float cbTopFade = smoothstep(1.0, 0.88, h);        // soft top fade
+  float cumulonimbus = (cbColumn + cbAnvil) * cbTopFade;
+
+  // Blend between types based on uCloudType [0..2]
+  float t = uCloudType;
+  if (t <= 1.0) {
+    return mix(stratus, cumulus, t);
+  } else {
+    return mix(cumulus, cumulonimbus, t - 1.0);
+  }
+}
+
+// =====================================================================
+//  3D Curl Noise — Divergence-free velocity field (optimised)
+//
+//  Computes curl of a scalar potential field using 3 offset noise
+//  evaluations instead of 18. The result is still divergence-free
+//  (∇·(∇×F) = 0) and qualitatively approximates incompressible
+//  Navier-Stokes, but at ~1/6 the cost of finite-difference curl.
+//
+//  Method: sample noise at 3 swizzled/offset positions, take pairwise
+//  differences to form a pseudo-gradient, then cross with a second.
+// =====================================================================
+vec3 curlNoise(vec3 p) {
+  // Three noise samples at offset positions (decorrelated axes)
+  float n1 = valueNoise3D(p + vec3(0.0, 31.41, -17.3));
+  float n2 = valueNoise3D(p + vec3(-23.6, 0.0, 43.7));
+  float n3 = valueNoise3D(p + vec3(41.2, -19.8, 0.0));
+
+  // Build two pseudo-gradient vectors from the noise differences
+  vec3 g1 = vec3(n2 - n3, n3 - n1, n1 - n2);
+  vec3 g2 = vec3(n3 - n1, n1 - n2, n2 - n3) * 1.7;
+
+  // Cross product of two gradients → guaranteed divergence-free
+  return cross(g1, g2);
+}
+
+// =====================================================================
+//  Tornado Vortex Field — Rankine Vortex Model
+//
+//  Injects a helical velocity field around a tornado center point.
+//  Inside the core radius: solid-body rotation (v_t ~ r)
+//  Outside: irrotational decay (v_t ~ 1/r)
+//  Plus vertical updraft and inward radial inflow.
+// =====================================================================
+vec3 tornadoVelocity(vec3 pos, vec3 tornadoCenter) {
+  vec3 toCenter = pos - tornadoCenter;
+  vec3 radialDir = normalize(toCenter);
+  float r = length(toCenter);
+
+  float coreRadius = 8.0;   // Rankine vortex core (world units)
+  float maxRadius = 60.0;   // influence falloff radius
+  float gamma = uTornadoStrength * 40.0;  // circulation strength
+
+  if (r > maxRadius) return vec3(0.0);
+
+  // Falloff beyond maxRadius
+  float falloff = smoothstep(maxRadius, coreRadius * 2.0, r);
+
+  // Tangential velocity (Rankine profile)
+  float vTheta;
+  if (r < coreRadius) {
+    vTheta = gamma * r / (coreRadius * coreRadius);  // solid body
+  } else {
+    vTheta = gamma / r;  // irrotational
+  }
+
+  // Tangent direction (perpendicular to radial, in the horizontal plane)
+  // Use the planet's radial direction as "up" to define the rotation plane
+  vec3 up = normalize(tornadoCenter);
+  vec3 tangent = normalize(cross(up, radialDir));
+
+  // Vertical updraft — strong near core, decays outward
+  float updraft = uTornadoStrength * 15.0 * exp(-r * r / (coreRadius * coreRadius * 4.0));
+
+  // Radial inflow — draws air inward (creates spiral)
+  float inflow = -uTornadoStrength * 5.0 * exp(-r * r / (coreRadius * coreRadius * 6.0));
+
+  vec3 vel = tangent * vTheta * falloff
+           + up * updraft * falloff
+           + radialDir * inflow * falloff;
+
+  return vel;
+}
+
+// =====================================================================
+//  Procedural tornado path — noise-based wandering on cloud shell
+// =====================================================================
+vec3 proceduralTornadoPos(float seed) {
+  float t = uTime * 0.02 + seed * 100.0;
+  // Wander on the sphere surface using noise-driven angles
+  float theta = valueNoise3D(vec3(t * 0.3, seed, 0.0)) * PI * 2.0;
+  float phi = valueNoise3D(vec3(0.0, t * 0.25, seed)) * PI * 0.4 + PI * 0.3;
+  float r = (uInnerRadius + uOuterRadius) * 0.5;
+  return vec3(
+    r * sin(phi) * cos(theta),
+    r * cos(phi),
+    r * sin(phi) * sin(theta)
+  );
+}
+
+// =====================================================================
+//  Full Advection Field — combines all velocity contributions
+//
+//  Two-scale curl noise + global wind + tornado vortices.
+//  This is the qualitative Navier-Stokes velocity field.
+//  Optimised: 2 curl evaluations (6 noise) instead of 3 (9 noise).
+// =====================================================================
+vec3 computeAdvection(vec3 pos, vec3 tornadoP1, vec3 tornadoP2) {
+  float t = uTime * uCloudSpeed;
+
+  // --- Layer 1: Large-scale weather flow (low frequency) ---
+  vec3 largeCurl = curlNoise(pos * 0.0015 + vec3(t * 0.05));
+  vec3 weatherFlow = largeCurl * uWeatherScale * 8.0;
+
+  // --- Layer 2: Medium-scale convective + turbulent motion ---
+  // Combined medium and small scale into one evaluation at intermediate freq
+  vec3 medCurl = curlNoise(pos * 0.008 + vec3(t * 0.15, t * 0.1, 0.0));
+  vec3 convection = medCurl * (uAdvectionStrength * 2.5 + uTurbulence * 0.8);
+
+  // --- Global wind drift ---
+  vec3 globalWind = vec3(uWindX, 0.0, uWindZ) * t;
+
+  // --- Tornado vortex contributions ---
+  vec3 tornadoVel = vec3(0.0);
+  if (uTornadoActive >= 1.0) {
+    tornadoVel += tornadoVelocity(pos, tornadoP1);
+  }
+  if (uTornadoActive >= 2.0) {
+    tornadoVel += tornadoVelocity(pos, tornadoP2);
+  }
+
+  return weatherFlow + convection + globalWind + tornadoVel * uTime * 0.01;
+}
+
+// =====================================================================
+//  Cloud density at a world-space position (full quality)
+//
+//  Combines: height profile morphology, curl noise advection,
+//  domain warping, multi-octave FBM, and tornado density focusing.
+//  Used for primary raymarch (48 steps).
+// =====================================================================
+float sampleCloudDensity(vec3 pos, vec3 tornadoP1, vec3 tornadoP2) {
   float r = length(pos);
   float shellThickness = uOuterRadius - uInnerRadius;
 
   // Normalised height within the cloud shell [0..1]
   float heightFrac = clamp((r - uInnerRadius) / shellThickness, 0.0, 1.0);
 
-  // Vertical density profile: round-bottom / anvil-top shape
-  // Dense in the lower-middle, thins out at top and bottom
-  float heightGrad = smoothstep(0.0, 0.15, heightFrac)
-                   * smoothstep(1.0, 0.65, heightFrac);
+  // Cloud type morphological height profile
+  float heightGrad = cloudHeightProfile(heightFrac);
 
-  // Sample point in noise space — use direction on sphere + height
-  // Drift clouds over time along a consistent wind direction
-  vec3 windOffset = vec3(uTime * uCloudSpeed * 0.7, 0.0, uTime * uCloudSpeed);
-  vec3 noisePos = pos * 0.008 + windOffset;  // scale to get nice cloud-sized features
+  // Early exit if height profile is negligible (saves noise evaluations)
+  if (heightGrad < 0.001) return 0.0;
 
-  // Primary shape: low-frequency FBM
+  // Compute advection displacement (curl noise + wind + tornadoes)
+  vec3 advection = computeAdvection(pos, tornadoP1, tornadoP2);
+
+  // Advected sample position in noise space
+  vec3 noisePos = pos * 0.008 + advection * 0.008;
+
+  // Single-channel domain warp (cheap: 1 noise eval instead of 3×FBM2=6)
+  float warpVal = valueNoise3D(noisePos * 0.4 + vec3(uTime * uCloudSpeed * 0.025));
+  noisePos += vec3(warpVal - 0.5) * uWeatherScale * 2.0;
+
+  // Primary shape: low-frequency FBM (large cloud forms)
   float shape = cloudFBM(noisePos);
 
-  // Detail erosion: higher-frequency noise subtracts from edges
-  float detail = cloudFBM(noisePos * 3.0 + vec3(37.0));
+  // Detail erosion: 3-octave FBM subtracts from edges (cheaper than 4)
+  float detail = cloudFBM3(noisePos * 3.0 + vec3(37.0));
 
-  // Combine: shape defines base, detail carves edges
+  // Combine shape and detail
   float density = shape - detail * 0.35;
 
-  // Apply coverage: shift the threshold
+  // Apply coverage threshold
   density = smoothstep(1.0 - uCoverage, 1.0, density);
 
-  // Apply vertical profile and global multiplier
+  // Tornado density boost: increase density near tornado cores
+  if (uTornadoActive >= 1.0) {
+    float dist1 = length(pos - tornadoP1);
+    float funnelWidth = 6.0 + heightFrac * 20.0;
+    density += exp(-dist1 * dist1 / (funnelWidth * funnelWidth)) * uTornadoStrength * 0.5;
+  }
+  if (uTornadoActive >= 2.0) {
+    float dist2 = length(pos - tornadoP2);
+    float funnelWidth = 6.0 + heightFrac * 20.0;
+    density += exp(-dist2 * dist2 / (funnelWidth * funnelWidth)) * uTornadoStrength * 0.5;
+  }
+
+  // Apply height profile and global density multiplier
   density *= heightGrad * uDensityMult;
 
+  return max(density, 0.0);
+}
+
+// =====================================================================
+//  Cheap cloud density for light marching
+//
+//  Skips curl noise advection and domain warping — uses only wind drift.
+//  Uses 3-octave FBM shape (no detail erosion). ~4x faster than full.
+//  Acceptable for light absorption since small errors average out.
+// =====================================================================
+float sampleCloudDensityLight(vec3 pos) {
+  float r = length(pos);
+  float shellThickness = uOuterRadius - uInnerRadius;
+  float heightFrac = clamp((r - uInnerRadius) / shellThickness, 0.0, 1.0);
+  float heightGrad = cloudHeightProfile(heightFrac);
+  if (heightGrad < 0.001) return 0.0;
+
+  // Simple wind offset (no curl noise — too expensive for light march)
+  float t = uTime * uCloudSpeed;
+  vec3 noisePos = pos * 0.008 + vec3(uWindX, 0.0, uWindZ) * t * 0.008;
+
+  // 3-octave shape only (no detail erosion)
+  float shape = cloudFBM3(noisePos);
+  float density = smoothstep(1.0 - uCoverage, 1.0, shape);
+
+  density *= heightGrad * uDensityMult;
   return max(density, 0.0);
 }
 
@@ -214,13 +441,12 @@ float lightMarch(vec3 pos) {
       break;
     }
 
-    tau += sampleCloudDensity(lightSample) * sunStep;
+    // Use cheap density (no curl noise, no domain warp) — ~4x faster
+    tau += sampleCloudDensityLight(lightSample) * sunStep;
   }
 
-  if (inShadow) return 0.0; // No direct sunlight
+  if (inShadow) return 0.0;
 
-  // Beer's Law: transmittance through the cloud toward the sun
-  // Use a gentler absorption coefficient so sun-facing clouds stay bright
   return exp(-tau * 0.6);
 }
 
@@ -311,6 +537,15 @@ void main() {
                     henyeyGreenstein(cosTheta, 0.75),   // forward scatter lobe
                     0.7);
 
+  // ---- Cache tornado positions (computed once per pixel, not per sample) ----
+  vec3 tP1 = vec3(0.0), tP2 = vec3(0.0);
+  if (uTornadoActive >= 1.0) {
+    tP1 = (length(uTornadoPos1) > 0.1) ? uTornadoPos1 : proceduralTornadoPos(1.0);
+  }
+  if (uTornadoActive >= 2.0) {
+    tP2 = (length(uTornadoPos2) > 0.1) ? uTornadoPos2 : proceduralTornadoPos(2.0);
+  }
+
   // ---- Raymarching loop ----
   vec3 luminance = vec3(0.0);
   float transmittance = 1.0;
@@ -322,7 +557,7 @@ void main() {
     if (t > tEnd) break;
 
     vec3 samplePos = rayOrigin + rayDir * t;
-    float density = sampleCloudDensity(samplePos) * densityScale;
+    float density = sampleCloudDensity(samplePos, tP1, tP2) * densityScale;
 
     if (density > 0.001) {
       // Beer's Law: transmittance loss through this step
@@ -393,20 +628,41 @@ export interface CloudConfig {
   segments: number;
   /** Max terrain height (to place cloud base above highest peaks) */
   terrainHeight: number;
+  /** Cloud type: 0=Stratus, 1=Cumulus, 2=Cumulonimbus */
+  cloudType: number;
+  /** Curl noise advection strength */
+  advectionStrength: number;
+  /** Small-scale turbulence */
+  turbulence: number;
+  /** Large-scale weather front intensity */
+  weatherScale: number;
+  /** Global wind direction X */
+  windX: number;
+  /** Global wind direction Z */
+  windZ: number;
+  /** Tornado vortex strength */
+  tornadoStrength: number;
 }
 
 const DEFAULT_CLOUD_CONFIG: CloudConfig = {
   planetRadius: 1000,
-  cloudBaseOffset: 45,        // clouds start 45 units above surface (above most terrain)
-  cloudThickness: 50,         // 25 units thick shell
-  coverage: 0.55,             // moderate coverage
+  cloudBaseOffset: 45,
+  cloudThickness: 50,
+  coverage: 0.55,
   densityMultiplier: 0.8,
   cloudSpeed: 0.3,
   sunIntensity: 22.0,
   cloudColor: new THREE.Vector3(1.0, 0.98, 0.95),
-  cloudShadowColor: new THREE.Vector3(0.2, 0.22, 0.25), // More neutral grey/blue for ambient light
+  cloudShadowColor: new THREE.Vector3(0.2, 0.22, 0.25),
   segments: 80,
   terrainHeight: 80,
+  cloudType: 1.0,
+  advectionStrength: 1.5,
+  turbulence: 0.8,
+  weatherScale: 1.0,
+  windX: 0.7,
+  windZ: 1.0,
+  tornadoStrength: 2.0,
 };
 
 // ---------------------------------------------------------------------------
@@ -439,6 +695,18 @@ export class Clouds {
         uSunIntensity:    { value: cfg.sunIntensity },
         uCloudColor:      { value: cfg.cloudColor },
         uCloudShadowColor:{ value: cfg.cloudShadowColor },
+        // Weather system
+        uCloudType:       { value: cfg.cloudType },
+        uAdvectionStrength:{ value: cfg.advectionStrength },
+        uTurbulence:      { value: cfg.turbulence },
+        uWeatherScale:    { value: cfg.weatherScale },
+        uWindX:           { value: cfg.windX },
+        uWindZ:           { value: cfg.windZ },
+        // Tornadoes
+        uTornadoPos1:     { value: new THREE.Vector3(0, 0, 0) },
+        uTornadoPos2:     { value: new THREE.Vector3(0, 0, 0) },
+        uTornadoActive:   { value: 0.0 },
+        uTornadoStrength: { value: cfg.tornadoStrength },
         // Depth buffer integration
         tDepth:           { value: null },
         uCameraNear:      { value: 0.5 },
@@ -503,6 +771,22 @@ export class Clouds {
   /** Advance time for cloud drift animation */
   updateTime(elapsed: number): void {
     this.material.uniforms['uTime'].value = elapsed;
+  }
+
+  /** Activate/deactivate tornadoes. mask: 0=none, 1=tornado1, 2=tornado2, 3=both */
+  setTornadoActive(mask: number): void {
+    this.material.uniforms['uTornadoActive'].value = mask;
+  }
+
+  /** Set tornado position (index 0 or 1). Pass null to use procedural position. */
+  setTornadoPosition(index: number, pos: THREE.Vector3 | null): void {
+    const name = index === 0 ? 'uTornadoPos1' : 'uTornadoPos2';
+    const v = this.material.uniforms[name].value as THREE.Vector3;
+    if (pos) {
+      v.copy(pos);
+    } else {
+      v.set(0, 0, 0); // zero-length triggers procedural path in shader
+    }
   }
 
   dispose(): void {

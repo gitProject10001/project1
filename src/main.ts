@@ -166,7 +166,7 @@ gui.addCard({
       onChange: v => { terrainConfig.mountainSharpness = v; scheduleTerrainRegen(); } },
     { label: 'Mountain Gain', key: 'mountainGain', min: 0.1, max: 0.9, step: 0.01, value: terrainConfig.mountainGain,
       onChange: v => { terrainConfig.mountainGain = v; scheduleTerrainRegen(); } },
-    { label: 'Detail Scale', key: 'detailScale', min: 1.0, max: 20.0, step: 0.5, value: terrainConfig.detailScale,
+    { label: 'Detail Scale', key: 'detailScale', min: 1.0, max: 50.0, step: 0.5, value: terrainConfig.detailScale,
       onChange: v => { terrainConfig.detailScale = v; scheduleTerrainRegen(); } },
     { label: 'Detail Strength', key: 'detailStrength', min: 0.0, max: 0.3, step: 0.005, value: terrainConfig.detailStrength,
       onChange: v => { terrainConfig.detailStrength = v; scheduleTerrainRegen(); } },
@@ -213,14 +213,30 @@ gui.addCard({
   title: 'Clouds',
   icon: '\u2601',
   sliders: [
-    { label: 'Coverage', key: 'cloudCoverage', min: 0.0, max: 1.0, step: 0.01, value: 0.55,
+    { label: 'Coverage', key: 'cloudCoverage', min: 0.0, max: 1.0, step: 0.01, value: 0.74,
       onChange: v => { planet.clouds.setUniform('uCoverage', v); planet.syncTerrainCloudParams(); } },
     { label: 'Density', key: 'cloudDensity', min: 0.1, max: 3.0, step: 0.05, value: 0.8,
       onChange: v => { planet.clouds.setUniform('uDensityMult', v); planet.syncTerrainCloudParams(); } },
     { label: 'Speed', key: 'cloudSpeed', min: 0.0, max: 2.0, step: 0.05, value: 0.3,
       onChange: v => { planet.clouds.setUniform('uCloudSpeed', v); planet.syncTerrainCloudParams(); } },
+    { label: 'Cloud Type', key: 'cloudType', min: 0.0, max: 2.0, step: 0.1, value: 1.0,
+      onChange: v => { planet.clouds.setUniform('uCloudType', v); planet.syncTerrainCloudParams(); } },
+    { label: 'Advection', key: 'cloudAdvection', min: 0.0, max: 5.0, step: 0.1, value: 1.5,
+      onChange: v => { planet.clouds.setUniform('uAdvectionStrength', v); planet.syncTerrainCloudParams(); } },
+    { label: 'Turbulence', key: 'cloudTurbulence', min: 0.0, max: 3.0, step: 0.1, value: 0.8,
+      onChange: v => { planet.clouds.setUniform('uTurbulence', v); planet.syncTerrainCloudParams(); } },
+    { label: 'Weather Scale', key: 'cloudWeather', min: 0.0, max: 3.0, step: 0.1, value: 1.0,
+      onChange: v => { planet.clouds.setUniform('uWeatherScale', v); planet.syncTerrainCloudParams(); } },
+    { label: 'Wind X', key: 'cloudWindX', min: -1.0, max: 1.0, step: 0.05, value: 0.7,
+      onChange: v => { planet.clouds.setUniform('uWindX', v); planet.syncTerrainCloudParams(); } },
+    { label: 'Wind Z', key: 'cloudWindZ', min: -1.0, max: 1.0, step: 0.05, value: 1.0,
+      onChange: v => { planet.clouds.setUniform('uWindZ', v); planet.syncTerrainCloudParams(); } },
     { label: 'Sun Intensity', key: 'cloudSunInt', min: 0, max: 60, step: 0.5, value: 22.0,
       onChange: v => planet.clouds.setUniform('uSunIntensity', v) },
+    { label: 'Tornado Strength', key: 'tornadoStrength', min: 0.0, max: 5.0, step: 0.1, value: 2.0,
+      onChange: v => { planet.clouds.setUniform('uTornadoStrength', v); planet.syncTerrainCloudParams(); } },
+    { label: 'Tornadoes Active', key: 'tornadoActive', min: 0, max: 3, step: 1, value: 0,
+      onChange: v => { planet.clouds.setTornadoActive(v); planet.syncTerrainCloudParams(); } },
   ],
   colors: [
     { label: 'Cloud Color', key: 'cloudColor', r: 1.0, g: 0.98, b: 0.95,
@@ -338,11 +354,27 @@ gui.addCard({
 
 const hudEl = document.getElementById('hud')!;
 
+// FPS tracking with smoothing
+let fpsFrames = 0;
+let fpsLastTime = performance.now();
+let fpsDisplay = 0;
+
 function updateHUD(): void {
+  // FPS calculation — update display every 500ms for stability
+  fpsFrames++;
+  const now = performance.now();
+  const elapsed = now - fpsLastTime;
+  if (elapsed >= 500) {
+    fpsDisplay = Math.round((fpsFrames * 1000) / elapsed);
+    fpsFrames = 0;
+    fpsLastTime = now;
+  }
+
   const speed = controls.speed.toFixed(1);
   const alt = (camera.position.length() - planet.radius).toFixed(1);
   const pos = camera.position;
   hudEl.innerHTML = [
+    `FPS: ${fpsDisplay}`,
     `SPD: ${speed} m/s`,
     `ALT: ${alt} m`,
     `POS: ${pos.x.toFixed(0)}, ${pos.y.toFixed(0)}, ${pos.z.toFixed(0)}`,
