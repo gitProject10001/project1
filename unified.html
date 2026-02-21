@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Space Explorer</title>
+    <title>Space Explorer — Unified Renderer</title>
     <style>
       * { margin: 0; padding: 0; box-sizing: border-box; }
       html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
@@ -83,9 +83,9 @@
         border-left: none;
       }
       #mode-switcher a.active {
-        background: rgba(60, 100, 180, 0.7);
+        background: rgba(180, 80, 60, 0.7);
         color: #fff;
-        border-color: rgba(100, 160, 255, 0.6);
+        border-color: rgba(255, 140, 100, 0.6);
       }
       #mode-switcher a:not(.active) {
         background: rgba(20, 20, 30, 0.85);
@@ -241,15 +241,15 @@
     </style>
   </head>
   <body>
+    <nav id="mode-switcher">
+      <a href="/hybrid.html">HYBRID</a>
+      <a href="/unified.html" class="active">UNIFIED</a>
+    </nav>
     <div id="hud"></div>
     <div id="crosshair"></div>
-    <nav id="mode-switcher">
-      <a href="/hybrid.html" class="active">HYBRID</a>
-      <a href="/unified.html">UNIFIED</a>
-    </nav>
     <div id="instructions">
       WASD: Thrust | QE: Roll | Shift: Boost | Mouse: Pitch/Yaw | Click to lock cursor
     </div>
-    <script type="module" src="/src/main-hybrid.ts"></script>
+    <script type="module" src="/src/main-unified.ts"></script>
   </body>
 </html>

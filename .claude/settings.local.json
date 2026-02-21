@@ -3,7 +3,8 @@
     "allow": [
       "Bash(npx tsc:*)",
       "Bash(dir:*)",
-      "Bash(npx vite build:*)"
+      "Bash(npx vite build:*)",
+      "Bash(npm install:*)"
     ]
   }
 }
