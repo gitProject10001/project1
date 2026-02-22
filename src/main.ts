@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 import { Planet, terrainConfig } from './Planet';
 import { CameraControls } from './CameraControls';
+import { FreeCameraControls } from './FreeCameraControls';
+import { Spaceship } from './Spaceship';
 import { GUI } from './GUI';
 
 // ---------------------------------------------------------------------------
@@ -51,7 +53,45 @@ const camera = new THREE.PerspectiveCamera(
 camera.position.set(0, 0, 3000);
 camera.lookAt(0, 0, 0);
 
-const controls = new CameraControls(camera, renderer.domElement);
+// Ship (hidden by default — shown in game mode)
+const ship = new Spaceship();
+ship.position.set(0, 0, 3000);
+ship.visible = false;
+scene.add(ship);
+
+// ---------------------------------------------------------------------------
+// Dual-mode controls: Free camera (default) ↔ Game mode (G key)
+// ---------------------------------------------------------------------------
+
+let gameMode = false;
+const freeControls = new FreeCameraControls(camera, renderer.domElement);
+const gameControls = new CameraControls(camera, ship, renderer.domElement);
+gameControls.enabled = false;
+
+document.addEventListener('keydown', (e) => {
+  if (e.code !== 'KeyG' || !document.pointerLockElement) return;
+  gameMode = !gameMode;
+  if (gameMode) {
+    // Free → Game: place ship at camera, switch to third-person
+    ship.position.copy(camera.position);
+    ship.quaternion.copy(camera.quaternion);
+    ship.velocity.copy(freeControls.velocity);
+    ship.visible = true;
+    freeControls.enabled = false;
+    freeControls.velocity.set(0, 0, 0);
+    gameControls.enabled = true;
+    gameControls.resetMouse();
+    gameControls.snap();
+  } else {
+    // Game → Free: keep camera where it is, switch to 6DOF
+    freeControls.velocity.copy(ship.velocity);
+    ship.velocity.set(0, 0, 0);
+    ship.visible = false;
+    gameControls.enabled = false;
+    freeControls.enabled = true;
+    freeControls.resetMouse();
+  }
+});
 
 // ---------------------------------------------------------------------------
 // Lighting
@@ -331,18 +371,24 @@ gui.addCard({
   title: 'Flight Controls',
   icon: '\uD83D\uDE80',
   sliders: [
-    { label: 'Thrust', key: 'thrust', min: 10, max: 1000, step: 10, value: controls.config.thrust,
-      onChange: v => { controls.config.thrust = v; } },
-    { label: 'Boost Multiplier', key: 'boost', min: 1, max: 20, step: 0.5, value: controls.config.boostMultiplier,
-      onChange: v => { controls.config.boostMultiplier = v; } },
-    { label: 'Max Speed', key: 'maxSpeed', min: 100, max: 10000, step: 50, value: controls.config.maxSpeed,
-      onChange: v => { controls.config.maxSpeed = v; } },
-    { label: 'Drag', key: 'drag', min: 0.9, max: 1.0, step: 0.002, value: controls.config.linearDrag,
-      onChange: v => { controls.config.linearDrag = v; } },
-    { label: 'Mouse Sensitivity', key: 'mouseSens', min: 0.0005, max: 0.01, step: 0.0005, value: controls.config.mouseSensitivity,
-      onChange: v => { controls.config.mouseSensitivity = v; } },
-    { label: 'Roll Speed', key: 'rollSpeed', min: 0.1, max: 5.0, step: 0.1, value: controls.config.rollSpeed,
-      onChange: v => { controls.config.rollSpeed = v; } },
+    { label: 'Thrust', key: 'thrust', min: 10, max: 1000, step: 10, value: ship.config.thrust,
+      onChange: v => { ship.config.thrust = v; freeControls.config.thrust = v; } },
+    { label: 'Boost Multiplier', key: 'boost', min: 1, max: 20, step: 0.5, value: ship.config.boostMultiplier,
+      onChange: v => { ship.config.boostMultiplier = v; freeControls.config.boostMultiplier = v; } },
+    { label: 'Max Speed', key: 'maxSpeed', min: 100, max: 10000, step: 50, value: ship.config.maxSpeed,
+      onChange: v => { ship.config.maxSpeed = v; freeControls.config.maxSpeed = v; } },
+    { label: 'Drag', key: 'drag', min: 0.9, max: 1.0, step: 0.002, value: ship.config.linearDrag,
+      onChange: v => { ship.config.linearDrag = v; freeControls.config.linearDrag = v; } },
+    { label: 'Mouse Sensitivity', key: 'mouseSens', min: 0.0005, max: 0.01, step: 0.0005, value: freeControls.config.mouseSensitivity,
+      onChange: v => { gameControls.config.mouseSensitivity = v; freeControls.config.mouseSensitivity = v; } },
+    { label: 'Pitch Speed', key: 'pitchSpeed', min: 0.1, max: 5.0, step: 0.1, value: ship.config.pitchSpeed,
+      onChange: v => { ship.config.pitchSpeed = v; } },
+    { label: 'Yaw Speed', key: 'yawSpeed', min: 0.1, max: 5.0, step: 0.1, value: ship.config.yawSpeed,
+      onChange: v => { ship.config.yawSpeed = v; } },
+    { label: 'Roll Speed', key: 'rollSpeed', min: 0.1, max: 5.0, step: 0.1, value: ship.config.rollSpeed,
+      onChange: v => { ship.config.rollSpeed = v; freeControls.config.rollSpeed = v; } },
+    { label: 'Gravity', key: 'gravity', min: 0, max: 200_000_000, step: 1_000_000, value: ship.config.gravityGM,
+      onChange: v => { ship.config.gravityGM = v; } },
     { label: 'FOV', key: 'fov', min: 30, max: 120, step: 1, value: 75,
       onChange: v => { camera.fov = v; camera.updateProjectionMatrix(); } },
   ],
@@ -370,10 +416,11 @@ function updateHUD(): void {
     fpsLastTime = now;
   }
 
-  const speed = controls.speed.toFixed(1);
-  const alt = (camera.position.length() - planet.radius).toFixed(1);
-  const pos = camera.position;
+  const speed = (gameMode ? ship.speed : freeControls.speed).toFixed(1);
+  const alt = ((gameMode ? ship.position.length() : camera.position.length()) - planet.radius).toFixed(1);
+  const pos = gameMode ? ship.position : camera.position;
   hudEl.innerHTML = [
+    `MODE: ${gameMode ? 'GAME [G]' : 'FREE [G]'}`,
     `FPS: ${fpsDisplay}`,
     `SPD: ${speed} m/s`,
     `ALT: ${alt} m`,
@@ -405,7 +452,7 @@ window.addEventListener('resize', () => {
 // ---------------------------------------------------------------------------
 
 function updateClipPlanes(): void {
-  const altitude = camera.position.length() - planet.radius;
+  const altitude = (gameMode ? ship.position.length() : camera.position.length()) - planet.radius;
   if (altitude < 50) {
     camera.near = 0.1;
     camera.far = 10000;
@@ -430,8 +477,36 @@ function animate(): void {
 
   const dt = Math.min(clock.getDelta(), 0.05); // Cap to avoid spiral of death
 
-  // Update flight controls
-  controls.update(dt);
+  // Update active flight controls
+  if (gameMode) {
+    gameControls.update(dt);
+
+    // --- Terrain collision ---
+    const surfaceH = planet.getHeightAt(ship.position);
+    const shipDist = ship.position.length();
+    const collisionBuffer = 2; // ship half-height
+    if (shipDist < surfaceH + collisionBuffer) {
+      const normal = ship.position.clone().normalize();
+      // Cancel inward velocity and add slight bounce
+      const vn = ship.velocity.dot(normal);
+      if (vn < 0) {
+        ship.velocity.addScaledVector(normal, -vn * 1.5);
+        ship.velocity.multiplyScalar(0.8); // friction
+      }
+      ship.position.copy(normal.multiplyScalar(surfaceH + collisionBuffer));
+    }
+
+    // --- Re-entry flame ---
+    const atmoRadius = (planet.radius + terrainConfig.terrainHeight) * 1.26;
+    const atmoDepth = Math.max(0, (atmoRadius - shipDist) / (atmoRadius - planet.radius));
+    const reentryIntensity = Math.min(1.0, atmoDepth * ship.speed / 300);
+    const velDir = ship.speed > 0.1
+      ? ship.velocity.clone().divideScalar(ship.speed)
+      : new THREE.Vector3(0, 0, -1);
+    ship.setReentryIntensity(reentryIntensity, clock.elapsedTime, velDir);
+  } else {
+    freeControls.update(dt);
+  }
 
   // Adjust clip planes based on altitude
   updateClipPlanes();

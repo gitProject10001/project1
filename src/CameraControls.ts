@@ -1,74 +1,81 @@
 import * as THREE from 'three';
+import { Spaceship } from './Spaceship';
 
 // ---------------------------------------------------------------------------
-// 6DOF Spaceship Camera Controller
+// Third-Person Orbit Camera anchored to a Spaceship
 // ---------------------------------------------------------------------------
+//
+// Mouse  → orbit around ship (360° horizontal, clamped vertical)
+// Scroll → zoom in/out
+// Keys   → forwarded to ship for flight controls
+//
+// The camera smoothly follows the ship with lerp and gently springs
+// back to the default behind-ship view when idle.
 
-/**
- * Six Degrees of Freedom flight camera.
- * - Mouse controls pitch (Y) and yaw (X)
- * - WASD for translational thrust (forward/back/strafe)
- * - Q/E for roll
- * - Shift for boost
- * - Space/Ctrl for vertical thrust (local up/down)
- *
- * Physics: acceleration-based with drag for smooth space-flight feel.
- */
-
-export interface FlightConfig {
-  /** Linear thrust (units/s^2) */
-  thrust: number;
-  /** Boost multiplier */
-  boostMultiplier: number;
-  /** Linear drag coefficient (0–1) */
-  linearDrag: number;
-  /** Pitch/yaw sensitivity (rad/pixel) */
+export interface CameraConfig {
+  /** Orbit mouse sensitivity (rad/pixel) */
   mouseSensitivity: number;
-  /** Roll speed (rad/s) */
-  rollSpeed: number;
-  /** Maximum speed cap */
-  maxSpeed: number;
+  /** Camera follow lerp speed */
+  followSpeed: number;
+  /** Default orbit distance from ship */
+  defaultDistance: number;
+  /** Minimum zoom distance */
+  minDistance: number;
+  /** Maximum zoom distance */
+  maxDistance: number;
+  /** Spring strength pulling camera back behind ship */
+  springStrength: number;
 }
-
-const DEFAULT_CONFIG: FlightConfig = {
-  thrust: 200,
-  boostMultiplier: 5,
-  linearDrag: 0.98,
-  mouseSensitivity: 0.002,
-  rollSpeed: 1.5,
-  maxSpeed: 2000,
-};
 
 export class CameraControls {
   camera: THREE.PerspectiveCamera;
-  config: FlightConfig;
+  ship: Spaceship;
+  config: CameraConfig;
 
-  /** Current velocity in world space */
-  velocity = new THREE.Vector3();
+  /** Set false to ignore input while another controller is active */
+  enabled = true;
 
-  /** Accumulated mouse delta (consumed each frame) */
+  /** Horizontal orbit angle (0 = behind ship) */
+  orbitTheta = 0;
+  /** Vertical orbit angle (positive = above) */
+  orbitPhi = 0.2;
+  /** Current orbit distance */
+  orbitDistance: number;
+
+  /** Key state — shared with ship */
+  keys = new Map<string, boolean>();
+
+  private _locked = false;
+  private domElement: HTMLElement;
   private mouseDX = 0;
   private mouseDY = 0;
 
-  /** Key state */
-  private keys = new Map<string, boolean>();
+  // Reusable vectors
+  private _offset = new THREE.Vector3();
+  private _target = new THREE.Vector3();
 
-  /** Pointer lock state */
-  private _locked = false;
-
-  private domElement: HTMLElement;
-
-  // Reusable quaternion temporaries
-  private _qPitch = new THREE.Quaternion();
-  private _qYaw = new THREE.Quaternion();
-  private _qRoll = new THREE.Quaternion();
-
-  constructor(camera: THREE.PerspectiveCamera, domElement: HTMLElement, config?: Partial<FlightConfig>) {
+  constructor(
+    camera: THREE.PerspectiveCamera,
+    ship: Spaceship,
+    domElement: HTMLElement,
+    config?: Partial<CameraConfig>,
+  ) {
     this.camera = camera;
+    this.ship = ship;
     this.domElement = domElement;
-    this.config = { ...DEFAULT_CONFIG, ...config };
+    this.config = {
+      mouseSensitivity: 0.003,
+      followSpeed: 5,
+      defaultDistance: 20,
+      minDistance: 5,
+      maxDistance: 200,
+      springStrength: 0.5,
+      ...config,
+    };
+    this.orbitDistance = this.config.defaultDistance;
 
     this.initListeners();
+    this.snap();
   }
 
   // -----------------------------------------------------------------------
@@ -76,112 +83,104 @@ export class CameraControls {
   // -----------------------------------------------------------------------
 
   private initListeners(): void {
-    // Pointer lock
     this.domElement.addEventListener('click', () => {
-      if (!this._locked) {
-        this.domElement.requestPointerLock();
-      }
+      if (!this._locked) this.domElement.requestPointerLock();
     });
 
     document.addEventListener('pointerlockchange', () => {
       this._locked = document.pointerLockElement === this.domElement;
     });
 
-    // Mouse
     document.addEventListener('mousemove', (e) => {
-      if (!this._locked) return;
+      if (!this._locked || !this.enabled) return;
       this.mouseDX += e.movementX;
       this.mouseDY += e.movementY;
     });
 
-    // Keyboard
-    document.addEventListener('keydown', (e) => {
-      this.keys.set(e.code, true);
-    });
-    document.addEventListener('keyup', (e) => {
-      this.keys.set(e.code, false);
+    document.addEventListener('keydown', (e) => this.keys.set(e.code, true));
+    document.addEventListener('keyup', (e) => this.keys.set(e.code, false));
+
+    this.domElement.addEventListener('wheel', (e) => {
+      this.orbitDistance *= 1 + e.deltaY * 0.001;
+      this.orbitDistance = Math.max(
+        this.config.minDistance,
+        Math.min(this.config.maxDistance, this.orbitDistance),
+      );
     });
   }
 
-  private key(code: string): boolean {
-    return this.keys.get(code) === true;
+  // -----------------------------------------------------------------------
+  // Accessors
+  // -----------------------------------------------------------------------
+
+  get locked(): boolean {
+    return this._locked;
+  }
+
+  get speed(): number {
+    return this.ship.speed;
+  }
+
+  get velocity(): THREE.Vector3 {
+    return this.ship.velocity;
+  }
+
+  /** Discard accumulated mouse deltas (call on mode switch). */
+  resetMouse(): void {
+    this.mouseDX = 0;
+    this.mouseDY = 0;
+  }
+
+  // -----------------------------------------------------------------------
+  // Camera positioning
+  // -----------------------------------------------------------------------
+
+  /** Immediately snap camera to target (no lerp). */
+  snap(): void {
+    this.computeOffset();
+    this.camera.position.copy(this.ship.position).add(this._offset);
+    this.camera.lookAt(this.ship.position);
+  }
+
+  private computeOffset(): void {
+    // Compute offset in ship-local space, then rotate to world
+    this._offset.set(
+      this.orbitDistance * Math.cos(this.orbitPhi) * Math.sin(this.orbitTheta),
+      this.orbitDistance * Math.sin(this.orbitPhi),
+      this.orbitDistance * Math.cos(this.orbitPhi) * Math.cos(this.orbitTheta),
+    );
+    this._offset.applyQuaternion(this.ship.quaternion);
   }
 
   // -----------------------------------------------------------------------
   // Update (call once per frame)
   // -----------------------------------------------------------------------
 
-  get speed(): number {
-    return this.velocity.length();
-  }
-
-  get locked(): boolean {
-    return this._locked;
-  }
-
   update(dt: number): void {
-    const cam = this.camera;
-    const cfg = this.config;
+    if (!this.enabled) return;
 
-    // --- Rotation ---
-
-    // Pitch & Yaw from mouse
-    const pitchAngle = -this.mouseDY * cfg.mouseSensitivity;
-    const yawAngle = -this.mouseDX * cfg.mouseSensitivity;
+    // Mouse → orbit angles
+    this.orbitTheta += this.mouseDX * this.config.mouseSensitivity;
+    this.orbitPhi -= this.mouseDY * this.config.mouseSensitivity;
     this.mouseDX = 0;
     this.mouseDY = 0;
 
-    // Roll from Q/E
-    let rollAngle = 0;
-    if (this.key('KeyQ')) rollAngle += cfg.rollSpeed * dt;
-    if (this.key('KeyE')) rollAngle -= cfg.rollSpeed * dt;
+    // Clamp phi to avoid gimbal lock
+    this.orbitPhi = Math.max(-Math.PI * 0.45, Math.min(Math.PI * 0.45, this.orbitPhi));
 
-    // Apply rotations in local space
-    // Order: yaw, pitch, roll — applied incrementally
-    this._qYaw.setFromAxisAngle(cam.up.clone().applyQuaternion(cam.quaternion.clone().invert()).set(0, 1, 0), yawAngle);
-    this._qPitch.setFromAxisAngle(new THREE.Vector3(1, 0, 0), pitchAngle);
-    this._qRoll.setFromAxisAngle(new THREE.Vector3(0, 0, -1), rollAngle);
+    // Update ship physics
+    this.ship.update(dt, this.keys);
 
-    // Combine: apply pitch and roll in local, yaw in local
-    const localRot = new THREE.Quaternion()
-      .multiply(this._qYaw)
-      .multiply(this._qPitch)
-      .multiply(this._qRoll);
+    // Compute target camera position
+    this.computeOffset();
+    this._target.copy(this.ship.position).add(this._offset);
 
-    cam.quaternion.multiply(localRot);
-    cam.quaternion.normalize();
+    // Smooth follow (exponential lerp for frame-rate independence)
+    const t = 1 - Math.exp(-this.config.followSpeed * dt);
+    this.camera.position.lerp(this._target, t);
 
-    // --- Translation ---
-    const boost = this.key('ShiftLeft') || this.key('ShiftRight') ? cfg.boostMultiplier : 1;
-    const accel = cfg.thrust * boost;
-
-    // Build local-space thrust vector
-    const thrustDir = new THREE.Vector3();
-    if (this.key('KeyW')) thrustDir.z -= 1;
-    if (this.key('KeyS')) thrustDir.z += 1;
-    if (this.key('KeyA')) thrustDir.x -= 1;
-    if (this.key('KeyD')) thrustDir.x += 1;
-    if (this.key('Space')) thrustDir.y += 1;
-    if (this.key('ControlLeft') || this.key('ControlRight')) thrustDir.y -= 1;
-
-    if (thrustDir.lengthSq() > 0) {
-      thrustDir.normalize();
-      // Transform thrust from local to world space
-      thrustDir.applyQuaternion(cam.quaternion);
-      this.velocity.addScaledVector(thrustDir, accel * dt);
-    }
-
-    // Drag
-    this.velocity.multiplyScalar(cfg.linearDrag);
-
-    // Speed cap
-    const spd = this.velocity.length();
-    if (spd > cfg.maxSpeed) {
-      this.velocity.multiplyScalar(cfg.maxSpeed / spd);
-    }
-
-    // Integrate position
-    cam.position.addScaledVector(this.velocity, dt);
+    // Always look at ship
+    this.camera.lookAt(this.ship.position);
   }
 
   dispose(): void {
