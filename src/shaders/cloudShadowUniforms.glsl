@@ -1,0 +1,16 @@
+uniform vec3  uCloudSunDir;
+uniform float uCloudInnerRadius;
+uniform float uCloudOuterRadius;
+uniform float uCloudCoverage;
+uniform float uCloudDensityMult;
+uniform float uCloudSpeed;
+uniform float uCloudTime;
+uniform float uCloudType;
+uniform float uCloudAdvection;
+uniform float uCloudWeatherScale;
+uniform float uCloudWindX;
+uniform float uCloudWindZ;
+uniform vec3  uCloudTornadoPos1;
+uniform vec3  uCloudTornadoPos2;
+uniform float uCloudTornadoActive;
+uniform float uCloudTornadoStrength;

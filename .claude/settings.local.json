@@ -3,7 +3,13 @@
     "allow": [
       "Bash(npx tsc:*)",
       "Bash(dir:*)",
-      "Bash(npx vite build:*)"
+      "Bash(npx vite build:*)",
+      "Bash(git stash)",
+      "Bash(git stash pop)",
+      "Bash(npm install -D vite-plugin-glsl)",
+      "mcp__Claude_Preview__preview_start",
+      "Bash(where npx)",
+      "Bash(node -e \":*)"
     ]
   }
 }
