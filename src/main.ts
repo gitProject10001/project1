@@ -256,6 +256,14 @@ gui.addCard({
   title: 'Ocean',
   icon: '\uD83C\uDF0A',
   sliders: [
+    { label: 'Wave Height', key: 'waveHeight', min: 0.0, max: 15.0, step: 0.5, value: 3.0,
+      onChange: v => planet.ocean.setUniform('uWaveHeight', v) },
+    { label: 'Wave Choppy', key: 'waveChoppy', min: 1.0, max: 8.0, step: 0.1, value: 4.0,
+      onChange: v => planet.ocean.setUniform('uWaveChoppy', v) },
+    { label: 'Wave Speed', key: 'waveSpeed', min: 0.0, max: 3.0, step: 0.05, value: 0.8,
+      onChange: v => planet.ocean.setUniform('uWaveSpeed', v) },
+    { label: 'Wave Frequency', key: 'waveFreq', min: 0.01, max: 1.0, step: 0.01, value: 0.15,
+      onChange: v => planet.ocean.setUniform('uWaveFreq', v) },
     { label: 'Sun Intensity', key: 'oceanSunInt', min: 0, max: 60, step: 0.5, value: 22.0,
       onChange: v => planet.ocean.setUniform('uSunIntensity', v) },
     { label: 'Max Depth Fade', key: 'oceanDepthFade', min: 5, max: 200, step: 1, value: 40.0,
@@ -503,6 +511,7 @@ function animate(): void {
   // Update camera-dependent uniforms for volumetric shaders
   planet.atmosphere.updateCameraUniforms(camera);
   planet.ocean.updateCameraUniforms(camera);
+  planet.ocean.updateTime(clock.elapsedTime);
   planet.clouds.updateCameraUniforms(camera);
   planet.clouds.updateTime(clock.elapsedTime);
 

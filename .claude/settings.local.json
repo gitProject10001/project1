@@ -10,7 +10,9 @@
       "mcp__Claude_Preview__preview_start",
       "Bash(where npx)",
       "Bash(node -e \":*)",
-      "Bash(wc -l \"C:\\\\Users\\\\jonny\\\\Desktop\\\\tree\\\\src\\\\shaders\"/*.glsl)"
+      "Bash(wc -l \"C:\\\\Users\\\\jonny\\\\Desktop\\\\tree\\\\src\\\\shaders\"/*.glsl)",
+      "WebFetch(domain:www.shadertoy.com)",
+      "WebFetch(domain:raw.githubusercontent.com)"
     ]
   }
 }

@@ -21,18 +21,30 @@ export interface OceanConfig {
   shallowColor: THREE.Vector3;
   /** Color at maximum depth */
   deepColor: THREE.Vector3;
+  /** Wave height (world units) */
+  waveHeight: number;
+  /** Wave choppiness (1-8) */
+  waveChoppy: number;
+  /** Wave animation speed */
+  waveSpeed: number;
+  /** Wave base frequency */
+  waveFreq: number;
 }
 
 const DEFAULT_OCEAN_CONFIG: OceanConfig = {
   planetRadius: 1000,
-  oceanRadius: 1025.6,  // PLANET_RADIUS + OCEAN_LEVEL * TERRAIN_HEIGHT
-  segments: 128,
+  oceanRadius: 1025.6,
+  segments: 200,
   sunIntensity: 22.0,
-  absorption: new THREE.Vector3(0.4, 0.08, 0.02),   // red absorbs most, blue least
-  scatterColor: new THREE.Vector3(0.0, 0.4, 0.3),    // teal scatter
-  maxDepthFade: 40.0,                                  // full absorption over 40 world units
-  shallowColor: new THREE.Vector3(0.04, 0.16, 0.28),  // bright teal
-  deepColor: new THREE.Vector3(0.005, 0.02, 0.08),    // dark blue
+  absorption: new THREE.Vector3(0.4, 0.08, 0.02),
+  scatterColor: new THREE.Vector3(0.0, 0.4, 0.3),
+  maxDepthFade: 40.0,
+  shallowColor: new THREE.Vector3(0.04, 0.16, 0.28),
+  deepColor: new THREE.Vector3(0.005, 0.02, 0.08),
+  waveHeight: 3.0,
+  waveChoppy: 4.0,
+  waveSpeed: 0.8,
+  waveFreq: 0.15,
 };
 
 // ---------------------------------------------------------------------------
@@ -54,6 +66,7 @@ export class Ocean {
         uSunIntensity: { value: cfg.sunIntensity },
         uPlanetRadius: { value: cfg.planetRadius },
         uOceanRadius:  { value: cfg.oceanRadius },
+        uTime:         { value: 0.0 },
         // Depth buffer
         tDepth:        { value: null },
         uCameraNear:   { value: 0.5 },
@@ -64,11 +77,19 @@ export class Ocean {
         uMaxDepthFade: { value: cfg.maxDepthFade },
         uShallowColor: { value: cfg.shallowColor },
         uDeepColor:    { value: cfg.deepColor },
+        // Wave parameters
+        uWaveHeight:   { value: cfg.waveHeight },
+        uWaveChoppy:   { value: cfg.waveChoppy },
+        uWaveSpeed:    { value: cfg.waveSpeed },
+        uWaveFreq:     { value: cfg.waveFreq },
       },
-      transparent: true,
+      transparent: false,
       side: THREE.FrontSide,
       depthWrite: true,
       depthTest: true,
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+      polygonOffsetUnits: -4,
     });
 
     const geo = new THREE.SphereGeometry(cfg.oceanRadius, cfg.segments, cfg.segments);
@@ -105,6 +126,10 @@ export class Ocean {
       this.material.uniforms['uCameraNear'].value = camera.near;
       this.material.uniforms['uCameraFar'].value = camera.far;
     }
+  }
+
+  updateTime(elapsed: number): void {
+    this.material.uniforms['uTime'].value = elapsed;
   }
 
   dispose(): void {
