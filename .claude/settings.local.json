@@ -9,7 +9,8 @@
       "Bash(npm install -D vite-plugin-glsl)",
       "mcp__Claude_Preview__preview_start",
       "Bash(where npx)",
-      "Bash(node -e \":*)"
+      "Bash(node -e \":*)",
+      "Bash(wc -l \"C:\\\\Users\\\\jonny\\\\Desktop\\\\tree\\\\src\\\\shaders\"/*.glsl)"
     ]
   }
 }

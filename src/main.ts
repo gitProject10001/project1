@@ -4,6 +4,7 @@ import { CameraControls } from './CameraControls';
 import { FreeCameraControls } from './FreeCameraControls';
 import { Spaceship } from './Spaceship';
 import { GUI } from './GUI';
+import { Starfield } from './Starfield';
 
 // ---------------------------------------------------------------------------
 // Scene bootstrap
@@ -36,7 +37,6 @@ function createDepthTarget(w: number, h: number): THREE.WebGLRenderTarget {
 let depthTarget = createDepthTarget(window.innerWidth, window.innerHeight);
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x000005);
 scene.fog = new THREE.FogExp2(0x000005, 0.000002);
 
 // ---------------------------------------------------------------------------
@@ -111,46 +111,11 @@ const hemiLight = new THREE.HemisphereLight(0x4488cc, 0x222211, 0.3);
 scene.add(hemiLight);
 
 // ---------------------------------------------------------------------------
-// Stars (background particles)
+// Stars (shader skybox)
 // ---------------------------------------------------------------------------
 
-function createStarfield(): THREE.Points {
-  const count = 8000;
-  const positions = new Float32Array(count * 3);
-  const colors = new Float32Array(count * 3);
-
-  for (let i = 0; i < count; i++) {
-    // Distribute on a large sphere
-    const theta = Math.random() * Math.PI * 2;
-    const phi = Math.acos(2 * Math.random() - 1);
-    const r = 40000 + Math.random() * 20000;
-    positions[i * 3] = r * Math.sin(phi) * Math.cos(theta);
-    positions[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta);
-    positions[i * 3 + 2] = r * Math.cos(phi);
-
-    // Slight colour variation
-    const temp = 0.7 + Math.random() * 0.3;
-    colors[i * 3] = temp;
-    colors[i * 3 + 1] = temp * (0.8 + Math.random() * 0.2);
-    colors[i * 3 + 2] = temp;
-  }
-
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-
-  const mat = new THREE.PointsMaterial({
-    size: 2,
-    sizeAttenuation: false,
-    vertexColors: true,
-    transparent: true,
-    opacity: 0.9,
-  });
-
-  return new THREE.Points(geo, mat);
-}
-
-scene.add(createStarfield());
+const starfield = new Starfield();
+scene.add(starfield.mesh);
 
 // ---------------------------------------------------------------------------
 // Planet
@@ -318,6 +283,20 @@ gui.addCard({
       onChange: (r, g, b) => planet.ocean.setUniform('uDeepColor', new THREE.Vector3(r, g, b)) },
     { label: 'Scatter Color', key: 'oceanScatter', r: 0.0, g: 0.4, b: 0.3,
       onChange: (r, g, b) => planet.ocean.setUniform('uScatterColor', new THREE.Vector3(r, g, b)) },
+  ],
+});
+
+// ---- Starfield Card ----
+gui.addCard({
+  title: 'Starfield',
+  icon: '\u2B50',
+  sliders: [
+    { label: 'Star Brightness', key: 'starBright', min: 0.0, max: 5.0, step: 0.1, value: 1.5,
+      onChange: v => starfield.setUniform('uStarBrightness', v) },
+    { label: 'Nebula Brightness', key: 'nebulaBright', min: 0.0, max: 2.0, step: 0.05, value: 0.6,
+      onChange: v => starfield.setUniform('uNebulaBrightness', v) },
+    { label: 'Twinkle Speed', key: 'twinkleSpeed', min: 0.0, max: 5.0, step: 0.1, value: 1.0,
+      onChange: v => starfield.setUniform('uTwinkleSpeed', v) },
   ],
 });
 
@@ -514,6 +493,10 @@ function animate(): void {
   // Force camera matrix update BEFORE planet LOD/culling reads it
   camera.updateMatrixWorld(true);
 
+  // Update starfield skybox
+  starfield.update(camera);
+  starfield.updateTime(clock.elapsedTime);
+
   // Update planet LOD
   planet.update(camera);
 
@@ -535,6 +518,7 @@ function animate(): void {
   planet.atmosphere.mesh.visible = false;
   planet.ocean.mesh.visible = false;
   planet.clouds.mesh.visible = false;
+  starfield.mesh.visible = false;
   renderer.setRenderTarget(depthTarget);
   renderer.render(scene, camera);
   renderer.setRenderTarget(null);
@@ -543,6 +527,7 @@ function animate(): void {
   planet.atmosphere.mesh.visible = true;
   planet.ocean.mesh.visible = true;
   planet.clouds.mesh.visible = true;
+  starfield.mesh.visible = true;
   renderer.render(scene, camera);
 
   // HUD
