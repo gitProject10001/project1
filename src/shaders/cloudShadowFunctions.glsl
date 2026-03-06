@@ -12,6 +12,13 @@ float csValueNoise3D(vec3 p) {
              mix(mix(csHash3(i+vec3(0,0,1)), csHash3(i+vec3(1,0,1)), u.x),
                  mix(csHash3(i+vec3(0,1,1)), csHash3(i+vec3(1,1,1)), u.x), u.y), u.z);
 }
+// 2 octaves — planetary weather map (must match main shader)
+float csFBM2(vec3 p) {
+  float v = 0.0, a = 0.5, f = 1.0, t = 0.0;
+  for (int i = 0; i < 2; i++) { v += a * csValueNoise3D(p * f); t += a; a *= 0.5; f *= 2.3; }
+  return v / t;
+}
+// 3 octaves — cloud form shapes (must match main shader)
 float csFBM3(vec3 p) {
   float v = 0.0, a = 0.5, f = 1.0, t = 0.0;
   for (int i = 0; i < 3; i++) { v += a * csValueNoise3D(p * f); t += a; a *= 0.5; f *= 2.3; }
@@ -47,23 +54,39 @@ vec3 csTornadoPos(float seed) {
   float r = (uCloudInnerRadius + uCloudOuterRadius) * 0.5;
   return vec3(r * sin(phi) * cos(theta), r * cos(phi), r * sin(phi) * sin(theta));
 }
-// Simplified shadow density: wind-only advection, 3-octave FBM, no curl noise
+// Planetary weather map (must match main shader)
+float csCloudWeather(vec3 pos) {
+  vec3 dir = normalize(pos);
+  float t = uCloudTime * uCloudSpeed * 0.3;
+  vec3 wp = dir * 3.5 + vec3(uCloudWindX * t * 0.001, 0.0, uCloudWindZ * t * 0.001);
+  return csFBM2(wp);
+}
+// Shadow density: form+weather model, wind-only advection, no curl noise
 float csSampleDensity(vec3 pos) {
   float r = length(pos);
   float hf = clamp((r - uCloudInnerRadius) / (uCloudOuterRadius - uCloudInnerRadius), 0.0, 1.0);
   float hg = csHeightProfile(hf);
   if (hg < 0.001) return 0.0;
 
+  // Weather distribution (must match main shader for consistent shadows)
+  float weather = csCloudWeather(pos);
+  float weatherMask = smoothstep(1.0 - uCloudCoverage - 0.05, 1.0 - uCloudCoverage + 0.2, weather);
+  if (weatherMask < 0.001) return 0.0;
+
   // Simple wind advection only (no curl noise for shadow perf)
   float t = uCloudTime * uCloudSpeed;
-  vec3 np = pos * 0.008 + vec3(uCloudWindX, 0.0, uCloudWindZ) * t * 0.008;
+  vec3 windOff = vec3(uCloudWindX, 0.0, uCloudWindZ) * t;
+  vec3 formPos = pos * 0.025 + windOff * 0.025;
 
-  // Single cheap warp
-  float warpVal = csValueNoise3D(np * 0.4 + vec3(t * 0.025));
-  np += vec3(warpVal - 0.5) * uCloudWeatherScale * 2.0;
+  // 3-octave form shape (matches light density in main shader)
+  float form = csFBM3(formPos);
 
-  float sh = csFBM3(np);
-  float dn = smoothstep(1.0 - uCloudCoverage, 1.0, sh);
+  float formThreshold = 0.55 - weatherMask * 0.2;
+  float sdf = form - formThreshold;
+  if (sdf < 0.0) return 0.0;
+
+  float profile = clamp(sdf / 0.3, 0.0, 1.0);
+  float dn = smoothstep(0.0, 0.15, profile) * 0.8;
 
   // Tornado density boost
   if (uCloudTornadoActive >= 1.0) {
@@ -79,7 +102,7 @@ float csSampleDensity(vec3 pos) {
     dn += exp(-d2 * d2 / (fw * fw)) * uCloudTornadoStrength * 0.5;
   }
 
-  return max(dn * hg * uCloudDensityMult, 0.0);
+  return max(dn * weatherMask * hg * uCloudDensityMult, 0.0);
 }
 float cloudShadow(vec3 worldPos) {
   vec2 ti = csRaySphere(worldPos, uCloudSunDir, uCloudInnerRadius);

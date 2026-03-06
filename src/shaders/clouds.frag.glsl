@@ -35,8 +35,12 @@ varying vec2 vUv;
 
 // ---- Constants ----
 #define PI 3.14159265359
-#define NUM_STEPS 48
+#define MAX_STEPS 80
 #define NUM_LIGHT_STEPS 4
+
+// Sphere-trace margin — detail noise can push cloud density this far
+// beyond the clean form SDF surface
+const float SDF_MARGIN = 15.0;
 
 // =====================================================================
 //  Interleaved Gradient Noise (Jimenez 2014)
@@ -66,12 +70,37 @@ float valueNoise3D(vec3 p) {
                  mix(hash3(i + vec3(0,1,1)), hash3(i + vec3(1,1,1)), u.x), u.y), u.z);
 }
 
-// FBM with 4 octaves — primary cloud shape
+// =====================================================================
+//  FBM Variants — different octave counts for different scales
+// =====================================================================
+
+// 2 octaves — planetary weather map (very cheap)
+float cloudFBM2(vec3 p) {
+  float value = 0.0, amp = 0.5, freq = 1.0, total = 0.0;
+  for (int i = 0; i < 2; i++) {
+    value += amp * valueNoise3D(p * freq);
+    total += amp;
+    amp   *= 0.5;
+    freq  *= 2.3;
+  }
+  return value / total;
+}
+
+// 3 octaves — cloud form shapes, light density, shadows
+float cloudFBM3(vec3 p) {
+  float value = 0.0, amp = 0.5, freq = 1.0, total = 0.0;
+  for (int i = 0; i < 3; i++) {
+    value += amp * valueNoise3D(p * freq);
+    total += amp;
+    amp   *= 0.5;
+    freq  *= 2.3;
+  }
+  return value / total;
+}
+
+// 4 octaves — primary cloud shape
 float cloudFBM(vec3 p) {
-  float value  = 0.0;
-  float amp    = 0.5;
-  float freq   = 1.0;
-  float total  = 0.0;
+  float value = 0.0, amp = 0.5, freq = 1.0, total = 0.0;
   for (int i = 0; i < 4; i++) {
     value += amp * valueNoise3D(p * freq);
     total += amp;
@@ -81,13 +110,10 @@ float cloudFBM(vec3 p) {
   return value / total;
 }
 
-// FBM with 3 octaves — used for detail erosion
-float cloudFBM3(vec3 p) {
-  float value  = 0.0;
-  float amp    = 0.5;
-  float freq   = 1.0;
-  float total  = 0.0;
-  for (int i = 0; i < 3; i++) {
+// 5 octaves — high-detail cloud microstructure
+float cloudFBM5(vec3 p) {
+  float value = 0.0, amp = 0.5, freq = 1.0, total = 0.0;
+  for (int i = 0; i < 5; i++) {
     value += amp * valueNoise3D(p * freq);
     total += amp;
     amp   *= 0.5;
@@ -258,11 +284,76 @@ vec3 computeAdvection(vec3 pos, vec3 tornadoP1, vec3 tornadoP2) {
 }
 
 // =====================================================================
-//  Cloud density at a world-space position (full quality)
+//  Planetary Weather Map
 //
-//  Combines: height profile morphology, curl noise advection,
-//  domain warping, multi-octave FBM, and tornado density focusing.
-//  Used for primary raymarch (48 steps).
+//  Low-frequency noise on the sphere surface determines regional
+//  cloud coverage. Creates weather fronts and clear zones at
+//  planetary scale. Sampled on the unit-sphere direction for uniform
+//  distribution regardless of altitude.
+// =====================================================================
+float cloudWeather(vec3 pos) {
+  vec3 dir = normalize(pos);
+  float t = uTime * uCloudSpeed * 0.3;
+  vec3 wp = dir * 3.5 + vec3(uWindX * t * 0.001, 0.0, uWindZ * t * 0.001);
+  return cloudFBM2(wp);
+}
+
+// =====================================================================
+//  Cloud Form Distance Estimate
+//
+//  Medium-frequency noise creates distinct cloud bodies/blobs.
+//  Returns a signed distance-like value for sphere-trace acceleration:
+//    positive = outside cloud, negative = inside cloud form.
+//  This is NOT a true SDF (gradient magnitude ≠ 1), but provides a
+//  conservative distance estimate when scaled appropriately.
+//  Used only for adaptive step sizing — never for shading.
+// =====================================================================
+float cloudFormDistance(vec3 pos) {
+  float r = length(pos);
+
+  // Height bounds — fast exit when outside the cloud shell
+  float hDist = max(uInnerRadius - r, r - uOuterRadius);
+  if (hDist > 0.0) return hDist;
+
+  float shellThickness = uOuterRadius - uInnerRadius;
+  float heightFrac = (r - uInnerRadius) / shellThickness;
+  float heightGrad = cloudHeightProfile(heightFrac);
+
+  // No clouds at this height band — return large distance
+  if (heightGrad < 0.01) return SDF_MARGIN * 2.0;
+
+  // Weather map culling — skip clear-sky regions entirely
+  float weather = cloudWeather(pos);
+  float weatherMask = smoothstep(1.0 - uCoverage - 0.05, 1.0 - uCoverage + 0.2, weather);
+  if (weatherMask < 0.01) return SDF_MARGIN * 2.0;
+
+  // Form noise — creates distinct cloud blobs at medium frequency
+  float t = uTime * uCloudSpeed;
+  vec3 windOff = vec3(uWindX, 0.0, uWindZ) * t;
+  vec3 formPos = pos * 0.025 + windOff * 0.025;
+  float form = cloudFBM3(formPos);
+
+  // Threshold adapts to weather coverage and height profile
+  float threshold = 0.55 - weatherMask * 0.2 - heightGrad * 0.1;
+
+  // Scale to approximate world-space distance
+  // Conservative: noise gradient magnitude is ~0.3-0.5, so *40 gives
+  // real-space distance with a built-in safety margin
+  return (threshold - form) * 40.0;
+}
+
+// =====================================================================
+//  Full Cloud Density (primary raymarch)
+//
+//  Three-layer approach:
+//    1. Weather map — planetary-scale distribution (where clouds exist)
+//    2. Form noise — medium-freq blobs (distinct cloud bodies)
+//    3. Detail noise — high-freq 5-octave FBM with wispy/billowy blend
+//
+//  The form noise creates an SDF-like "profile" (depth into cloud),
+//  and the detail noise erodes it with depth-dependent blending:
+//  edges are wispy (translucent tendrils), interiors are billowy
+//  (dense cotton). This is the Nubis technique.
 // =====================================================================
 float sampleCloudDensity(vec3 pos, vec3 tornadoP1, vec3 tornadoP2) {
   float r = length(pos);
@@ -273,31 +364,49 @@ float sampleCloudDensity(vec3 pos, vec3 tornadoP1, vec3 tornadoP2) {
 
   // Cloud type morphological height profile
   float heightGrad = cloudHeightProfile(heightFrac);
-
-  // Early exit if height profile is negligible (saves noise evaluations)
   if (heightGrad < 0.001) return 0.0;
+
+  // ---- Layer 1: Planetary weather distribution ----
+  float weather = cloudWeather(pos);
+  float weatherMask = smoothstep(1.0 - uCoverage - 0.05, 1.0 - uCoverage + 0.2, weather);
+  if (weatherMask < 0.001) return 0.0;
 
   // Compute advection displacement (curl noise + wind + tornadoes)
   vec3 advection = computeAdvection(pos, tornadoP1, tornadoP2);
 
-  // Advected sample position in noise space
-  vec3 noisePos = pos * 0.008 + advection * 0.008;
+  // ---- Layer 2: Form noise — distinct cloud bodies ----
+  float t = uTime * uCloudSpeed;
+  vec3 windOff = vec3(uWindX, 0.0, uWindZ) * t;
+  vec3 formPos = pos * 0.025 + advection * 0.008 + windOff * 0.025;
 
-  // Single-channel domain warp (cheap: 1 noise eval instead of 3×FBM2=6)
-  float warpVal = valueNoise3D(noisePos * 0.4 + vec3(uTime * uCloudSpeed * 0.025));
-  noisePos += vec3(warpVal - 0.5) * uWeatherScale * 2.0;
+  // Domain warp for organic, non-repetitive shapes
+  float warpVal = valueNoise3D(formPos * 0.4 + vec3(t * 0.025));
+  formPos += vec3(warpVal - 0.5) * uWeatherScale * 1.5;
 
-  // Primary shape: low-frequency FBM (large cloud forms)
-  float shape = cloudFBM(noisePos);
+  float form = cloudFBM(formPos);
 
-  // Detail erosion: 3-octave FBM subtracts from edges (cheaper than 4)
-  float detail = cloudFBM3(noisePos * 3.0 + vec3(37.0));
+  // SDF-like profile: how deep inside the cloud form [0..1]
+  float formThreshold = 0.55 - weatherMask * 0.2;
+  float sdf = form - formThreshold;
+  if (sdf < 0.0) return 0.0;
 
-  // Combine shape and detail
-  float density = shape - detail * 0.35;
+  float profile = clamp(sdf / 0.3, 0.0, 1.0);
 
-  // Apply coverage threshold
-  density = smoothstep(1.0 - uCoverage, 1.0, density);
+  // ---- Layer 3: Detail microstructure — 5-octave FBM ----
+  vec3 detailPos = pos * 0.06 + advection * 0.015 + windOff * 0.01;
+  float n = cloudFBM5(detailPos);
+
+  // Wispy/billowy blend (Nubis technique)
+  // Edges (low profile) → wispy: translucent, tendril-like
+  // Interiors (high profile) → billowy: dense, cotton-like
+  float wispy = n;
+  float billowy = 1.0 - abs(n * 2.0 - 1.0);
+  float detail = mix(wispy, billowy, smoothstep(0.0, 1.0, profile));
+
+  // Smoothstep erosion — depth controls how much erosion occurs
+  // Deep inside: minimal erosion (dense core)
+  // At edges: maximum erosion (soft, natural boundaries)
+  float density = smoothstep(0.0, 0.25, profile - detail * 0.55);
 
   // Tornado density boost: increase density near tornado cores
   if (uTornadoActive >= 1.0) {
@@ -311,8 +420,8 @@ float sampleCloudDensity(vec3 pos, vec3 tornadoP1, vec3 tornadoP2) {
     density += exp(-dist2 * dist2 / (funnelWidth * funnelWidth)) * uTornadoStrength * 0.5;
   }
 
-  // Apply height profile and global density multiplier
-  density *= heightGrad * uDensityMult;
+  // Apply all masks and multipliers
+  density *= weatherMask * heightGrad * uDensityMult;
 
   return max(density, 0.0);
 }
@@ -320,9 +429,10 @@ float sampleCloudDensity(vec3 pos, vec3 tornadoP1, vec3 tornadoP2) {
 // =====================================================================
 //  Cheap cloud density for light marching
 //
-//  Skips curl noise advection and domain warping — uses only wind drift.
-//  Uses 3-octave FBM shape (no detail erosion). ~4x faster than full.
-//  Acceptable for light absorption since small errors average out.
+//  Matches the form+weather model but skips curl noise advection,
+//  domain warping, and detail erosion. Uses 3-octave form FBM only.
+//  ~4x faster than full density. Acceptable for light absorption
+//  since small per-sample errors average out along the sun path.
 // =====================================================================
 float sampleCloudDensityLight(vec3 pos) {
   float r = length(pos);
@@ -331,15 +441,27 @@ float sampleCloudDensityLight(vec3 pos) {
   float heightGrad = cloudHeightProfile(heightFrac);
   if (heightGrad < 0.001) return 0.0;
 
+  // Weather distribution — must match full density for consistent shadows
+  float weather = cloudWeather(pos);
+  float weatherMask = smoothstep(1.0 - uCoverage - 0.05, 1.0 - uCoverage + 0.2, weather);
+  if (weatherMask < 0.001) return 0.0;
+
   // Simple wind offset (no curl noise — too expensive for light march)
   float t = uTime * uCloudSpeed;
-  vec3 noisePos = pos * 0.008 + vec3(uWindX, 0.0, uWindZ) * t * 0.008;
+  vec3 windOff = vec3(uWindX, 0.0, uWindZ) * t;
+  vec3 formPos = pos * 0.025 + windOff * 0.025;
 
-  // 3-octave shape only (no detail erosion)
-  float shape = cloudFBM3(noisePos);
-  float density = smoothstep(1.0 - uCoverage, 1.0, shape);
+  // 3-octave form shape (no detail erosion)
+  float form = cloudFBM3(formPos);
 
-  density *= heightGrad * uDensityMult;
+  float formThreshold = 0.55 - weatherMask * 0.2;
+  float sdf = form - formThreshold;
+  if (sdf < 0.0) return 0.0;
+
+  float profile = clamp(sdf / 0.3, 0.0, 1.0);
+  float density = smoothstep(0.0, 0.15, profile) * 0.8;
+
+  density *= weatherMask * heightGrad * uDensityMult;
   return max(density, 0.0);
 }
 
@@ -383,11 +505,14 @@ float linearizeLogDepth(float d) {
 }
 
 // =====================================================================
-//  Light march: estimate optical thickness between a cloud sample
-//  and the sun to compute how much light reaches that sample.
-//  Uses Beer's Law: transmittance = exp(-tau).
+//  Light march with multi-scatter approximation
+//
+//  Estimates optical thickness between a cloud sample and the sun.
+//  Returns direct transmittance via Beer's Law, plus a multi-scatter
+//  term that approximates light bouncing inside the cloud, brightening
+//  interiors and giving that characteristic glowing, translucent look.
 // =====================================================================
-float lightMarch(vec3 pos) {
+float lightMarch(vec3 pos, out float multiScatter) {
   // March toward the sun, exiting through the outer cloud shell
   vec2 tSun = raySphereIntersect(pos, uSunDir, uOuterRadius);
   float sunPathLen = max(tSun.y, 0.0);
@@ -409,7 +534,12 @@ float lightMarch(vec3 pos) {
     tau += sampleCloudDensityLight(lightSample) * sunStep;
   }
 
-  if (inShadow) return 0.0;
+  if (inShadow) { multiScatter = 0.0; return 0.0; }
+
+  // Multi-scatter: softer extinction simulates photons scattering
+  // multiple times through the cloud before reaching this sample.
+  // Deeper penetration than single-scatter alone.
+  multiScatter = exp(-tau * 0.1) * 0.35;
 
   return exp(-tau * 0.6);
 }
@@ -479,8 +609,8 @@ void main() {
   // ---- Jitter ray start to reduce banding ----
   float jitter = interleavedGradientNoise(gl_FragCoord.xy);
   float segLen = tEnd - tStart;
-  float stepSize = segLen / float(NUM_STEPS);
-  tStart += jitter * stepSize;
+  float fineStep = segLen / 64.0;
+  float t = tStart + jitter * fineStep;
 
   // ---- Density scaling for long ray paths ----
   // When viewing from orbit, the ray can traverse the entire cloud shell
@@ -510,37 +640,57 @@ void main() {
     tP2 = (length(uTornadoPos2) > 0.1) ? uTornadoPos2 : proceduralTornadoPos(2.0);
   }
 
-  // ---- Raymarching loop ----
+  // ---- Raymarching loop with SDF-accelerated adaptive stepping ----
+  //
+  // Three-tier culling strategy:
+  //   1. Height bounds: cloudFormDistance returns shell distance when outside
+  //   2. Weather map: cloudFormDistance returns large distance in clear-sky regions
+  //   3. Form SDF: cloudFormDistance skips empty space between cloud bodies
+  //
+  // Only samples near/inside cloud forms get the expensive full density
+  // evaluation (5-octave FBM + curl noise advection + wispy/billowy blend).
+  // This concentrates computational budget on visible cloud detail.
   vec3 luminance = vec3(0.0);
   float transmittance = 1.0;
 
-  for (int i = 0; i < NUM_STEPS; i++) {
-    if (transmittance < 0.01) break;  // Early exit when opaque
-
-    float t = tStart + float(i) * stepSize;
-    if (t > tEnd) break;
+  for (int i = 0; i < MAX_STEPS; i++) {
+    if (t >= tEnd || transmittance < 0.01) break;
 
     vec3 samplePos = rayOrigin + rayDir * t;
+
+    // Cheap distance estimate for visibility culling
+    float dist = cloudFormDistance(samplePos);
+
+    if (dist > SDF_MARGIN) {
+      // Far from any cloud form — leap forward conservatively
+      t += max(dist - SDF_MARGIN, fineStep);
+      continue;
+    }
+
+    // Near or inside cloud form — full density evaluation
     float density = sampleCloudDensity(samplePos, tP1, tP2) * densityScale;
 
     if (density > 0.001) {
       // Beer's Law: transmittance loss through this step
-      float sampleTau = density * stepSize;
+      float sampleTau = density * fineStep;
       float sampleTransmittance = exp(-sampleTau);
 
-      // Light reaching this sample from the sun
-      float sunTransmittance = lightMarch(samplePos);
+      // Light reaching this sample from the sun, with multi-scatter
+      float multiScatter;
+      float sunTransmittance = lightMarch(samplePos, multiScatter);
 
       // Beer-powder: blend between Beer's law and powder effect based
       // on how aligned the view is with the sun. This prevents the
       // powder term from darkening the sun-facing side of clouds.
-      float powder = 1.0 - exp(-density * stepSize * 2.0);
+      float powder = 1.0 - exp(-density * fineStep * 2.0);
       // On the sun-facing side (cosTheta > 0), use mostly Beer's law
       // On the shadow side, blend in the powder for silver-lining
       float beerPowder = mix(powder, 1.0, 0.5 + 0.5 * cosTheta);
 
-      // In-scattered light at this sample
-      vec3 sunLight = uCloudColor * uSunIntensity * sunTransmittance * phase * beerPowder;
+      // Direct sunlight + multi-scatter interior glow
+      vec3 sunLight = uCloudColor * uSunIntensity
+                    * (sunTransmittance * phase + multiScatter)
+                    * beerPowder;
 
       // Ambient/sky fill — modulated by how much this part of the
       // planet faces the sun. On the night side, ambient drops to near zero.
@@ -555,6 +705,8 @@ void main() {
       luminance += transmittance * integScatter;
       transmittance *= sampleTransmittance;
     }
+
+    t += fineStep;
   }
 
   float alpha = 1.0 - transmittance;
