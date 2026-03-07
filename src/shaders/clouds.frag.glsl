@@ -564,10 +564,12 @@ void main() {
   if (tOuter.x > tOuter.y) discard; // Ray misses cloud shell entirely
 
   // Determine ray segment through the shell.
-  // If camera is below inner radius, the ray enters at tInner.y (exit of inner sphere)
-  // and exits at tOuter.y. If camera is between inner and outer, it starts at 0.
-  // If camera is above outer, it enters at tOuter.x and exits at tOuter.y (but we
-  // must skip the interior planet if the ray passes through the inner sphere).
+  // Always march to tOuter.y — the SDF height-bounds check efficiently skips
+  // the below-cloud volume inside the inner sphere. The inner sphere is the
+  // cloud base altitude, NOT the planet surface, so stopping there was wrong
+  // and created a hard seam at the tangent angle where tEnd jumped from
+  // tInner.x to tOuter.y. The terrain depth texture handles actual planet
+  // surface occlusion.
 
   float camR = length(rayOrigin);
   float tStart, tEnd;
@@ -579,21 +581,11 @@ void main() {
   } else if (camR > uOuterRadius) {
     // Camera above cloud layer
     tStart = tOuter.x;
-    // If ray also hits the inner sphere, stop at its entry (hollow shell)
-    if (tInner.x < tInner.y && tInner.x > 0.0) {
-      tEnd = tInner.x;
-    } else {
-      tEnd = tOuter.y;
-    }
+    tEnd   = tOuter.y;
   } else {
     // Camera inside the cloud shell
     tStart = 0.0;
-    // If ray hits inner sphere, stop there; otherwise march to outer exit
-    if (tInner.x < tInner.y && tInner.x > 0.0) {
-      tEnd = tInner.x;
-    } else {
-      tEnd = tOuter.y;
-    }
+    tEnd   = tOuter.y;
   }
 
   tStart = max(tStart, 0.0);
@@ -619,7 +611,6 @@ void main() {
   // length greatly exceeds the shell thickness so individual cloud
   // features remain visible from any angle.
   float shellThickness = uOuterRadius - uInnerRadius;
-  float pathRatio = segLen / shellThickness;
   // For a grazing ray (pathRatio ~ 1) densityScale = 1.0
   // For a full-diameter ray (pathRatio ~ 40+) densityScale ~ 0.15
   float densityScale = shellThickness / max(segLen, shellThickness);
