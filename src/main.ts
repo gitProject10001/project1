@@ -36,6 +36,54 @@ function createDepthTarget(w: number, h: number): THREE.WebGLRenderTarget {
 
 let depthTarget = createDepthTarget(window.innerWidth, window.innerHeight);
 
+// ---------------------------------------------------------------------------
+// Cloud temporal reprojection (ping-pong pair + blit quad)
+// ---------------------------------------------------------------------------
+
+function createCloudTarget(w: number, h: number): THREE.WebGLRenderTarget {
+  const dpr = renderer.getPixelRatio();
+  return new THREE.WebGLRenderTarget(w * dpr, h * dpr, {
+    minFilter: THREE.LinearFilter,
+    magFilter: THREE.LinearFilter,
+    type: THREE.HalfFloatType,
+    format: THREE.RGBAFormat,
+    depthBuffer: false,
+  });
+}
+
+let cloudTargetA = createCloudTarget(window.innerWidth, window.innerHeight);
+let cloudTargetB = createCloudTarget(window.innerWidth, window.innerHeight);
+let cloudPingPong = 0;
+let cloudFrameIndex = 0;
+
+const cloudBlitScene = new THREE.Scene();
+const cloudBlitCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const cloudBlitMaterial = new THREE.ShaderMaterial({
+  vertexShader: `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = vec4(position.xy, 0.0, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform sampler2D tCloud;
+    varying vec2 vUv;
+    void main() {
+      gl_FragColor = texture2D(tCloud, vUv);
+    }
+  `,
+  uniforms: { tCloud: { value: null } },
+  transparent: true,
+  depthWrite: false,
+  depthTest: false,
+  blending: THREE.CustomBlending,
+  blendSrc: THREE.OneFactor,
+  blendDst: THREE.OneMinusSrcAlphaFactor,
+  blendEquation: THREE.AddEquation,
+});
+cloudBlitScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), cloudBlitMaterial));
+
 const scene = new THREE.Scene();
 scene.fog = new THREE.FogExp2(0x000005, 0.000002);
 
@@ -131,6 +179,7 @@ planet.ocean.setSunDirection(sunDir);
 planet.ocean.setDepthTexture(depthTarget.depthTexture!);
 planet.clouds.setSunDirection(sunDir);
 planet.clouds.setDepthTexture(depthTarget.depthTexture!);
+planet.clouds.mesh.layers.set(1); // Separate layer for temporal cloud pipeline
 planet.setTerrainSunDirection(sunDir);
 
 // ---------------------------------------------------------------------------
@@ -432,6 +481,13 @@ window.addEventListener('resize', () => {
   planet.atmosphere.setDepthTexture(depthTarget.depthTexture!);
   planet.ocean.setDepthTexture(depthTarget.depthTexture!);
   planet.clouds.setDepthTexture(depthTarget.depthTexture!);
+
+  // Rebuild cloud temporal targets
+  cloudTargetA.dispose();
+  cloudTargetB.dispose();
+  cloudTargetA = createCloudTarget(window.innerWidth, window.innerHeight);
+  cloudTargetB = createCloudTarget(window.innerWidth, window.innerHeight);
+  cloudFrameIndex = 0; // Re-render all pixels on first frame after resize
 });
 
 // ---------------------------------------------------------------------------
@@ -520,24 +576,58 @@ function animate(): void {
   planet.syncTerrainCloudParams();
 
   // ---------------------------------------------------------------------------
-  // Two-pass hybrid pipeline
+  // Four-pass temporal reprojection pipeline
   // ---------------------------------------------------------------------------
 
-  // Pass 1: Render opaque terrain into the depth target
+  const currentCloudTarget = cloudPingPong === 0 ? cloudTargetA : cloudTargetB;
+  const historyCloudTarget = cloudPingPong === 0 ? cloudTargetB : cloudTargetA;
+
+  // Set temporal uniforms
+  planet.clouds.material.uniforms.uFrameIndex.value = cloudFrameIndex;
+  planet.clouds.material.uniforms.uTemporalEnabled.value = cloudFrameIndex > 0 ? 1.0 : 0.0;
+  planet.clouds.material.uniforms.tHistory.value = historyCloudTarget.texture;
+
+  const prevAutoClear = renderer.autoClear;
+  renderer.autoClear = false;
+
+  // Pass 1: Opaque terrain → depth target
   planet.atmosphere.mesh.visible = false;
   planet.ocean.mesh.visible = false;
-  planet.clouds.mesh.visible = false;
   starfield.mesh.visible = false;
+  camera.layers.set(0);
   renderer.setRenderTarget(depthTarget);
+  renderer.clear();
   renderer.render(scene, camera);
-  renderer.setRenderTarget(null);
 
-  // Pass 2: Render everything (volumetric shaders now read the depth texture)
+  // Pass 2: Clouds (temporal checkerboard) → cloud render target
+  camera.layers.set(1);
+  renderer.setRenderTarget(currentCloudTarget);
+  renderer.setClearColor(0x000000, 0);
+  renderer.clear(true, false, false);
+  renderer.setClearColor(0x000000, 1);
+  renderer.render(scene, camera);
+
+  // Pass 3: Full scene without clouds → screen
+  camera.layers.set(0);
   planet.atmosphere.mesh.visible = true;
   planet.ocean.mesh.visible = true;
-  planet.clouds.mesh.visible = true;
   starfield.mesh.visible = true;
+  renderer.setRenderTarget(null);
+  renderer.clear();
   renderer.render(scene, camera);
+
+  // Pass 4: Composite temporal clouds onto screen
+  cloudBlitMaterial.uniforms.tCloud.value = currentCloudTarget.texture;
+  renderer.render(cloudBlitScene, cloudBlitCamera);
+
+  camera.layers.enableAll();
+  renderer.autoClear = prevAutoClear;
+
+  // Store current VP as "previous" for next frame's reprojection
+  (planet.clouds.material.uniforms.uPrevViewProjMatrix.value as THREE.Matrix4)
+    .multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+  cloudPingPong = 1 - cloudPingPong;
+  cloudFrameIndex = (cloudFrameIndex + 1) % 65536;
 
   // HUD
   updateHUD();

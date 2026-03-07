@@ -1,6 +1,8 @@
 import * as THREE from 'three';
+import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import reentryVertexShader from './shaders/reentry.vert.glsl';
 import reentryFragmentShader from './shaders/reentry.frag.glsl';
+import spaceshipModelUrl from '../assets/SpaceShip.obj?url';
 
 // ---------------------------------------------------------------------------
 // Spaceship — player-controlled vessel with inertia-based physics
@@ -69,7 +71,16 @@ export class Spaceship extends THREE.Group {
       ...config,
     };
 
-    this.engineGlow = this.buildMesh();
+    // Engine glow (unlit — always visible, positioned at back of ship)
+    this.engineGlow = new THREE.Mesh(
+      new THREE.SphereGeometry(0.7, 8, 8),
+      new THREE.MeshBasicMaterial({ color: 0x2244aa }),
+    );
+    this.engineGlow.position.set(0, 0, 3);
+    this.add(this.engineGlow);
+
+    // Load FBX model
+    this.loadModel();
 
     // Re-entry flame shield (sphere around ship)
     this.reentryMat = new THREE.ShaderMaterial({
@@ -93,32 +104,39 @@ export class Spaceship extends THREE.Group {
     this.add(this.reentryShield);
   }
 
-  private buildMesh(): THREE.Mesh {
-    // Fuselage — cone pointing forward (-Z in local space)
-    const body = new THREE.Mesh(
-      new THREE.ConeGeometry(1.5, 6, 8),
-      new THREE.MeshStandardMaterial({ color: 0x88aacc, metalness: 0.7, roughness: 0.3 }),
-    );
-    body.rotation.x = Math.PI / 2;
-    this.add(body);
+  private loadModel(): void {
+    const loader = new OBJLoader();
+    loader.load(spaceshipModelUrl, (obj) => {
+      // Normalize the model: center it, scale to fit, orient forward along -Z
+      const box = new THREE.Box3().setFromObject(obj);
+      const size = box.getSize(new THREE.Vector3());
+      const center = box.getCenter(new THREE.Vector3());
 
-    // Delta wings
-    const wings = new THREE.Mesh(
-      new THREE.BoxGeometry(6, 0.15, 2.5),
-      new THREE.MeshStandardMaterial({ color: 0x667799, metalness: 0.6, roughness: 0.4 }),
-    );
-    wings.position.set(0, 0, 1);
-    this.add(wings);
+      // Scale so the longest dimension is ~6 units (matching previous ship size)
+      const maxDim = Math.max(size.x, size.y, size.z);
+      const scale = 6 / maxDim;
+      obj.scale.setScalar(scale);
 
-    // Engine glow (unlit — always visible)
-    const engine = new THREE.Mesh(
-      new THREE.SphereGeometry(0.7, 8, 8),
-      new THREE.MeshBasicMaterial({ color: 0x2244aa }),
-    );
-    engine.position.set(0, 0, 3);
-    this.add(engine);
+      // Center the model and rotate so Blender's +Y forward maps to -Z
+      obj.position.set(-center.x * scale, -center.y * scale, -center.z * scale);
+      obj.rotation.x = -Math.PI / 2;
 
-    return engine;
+      // Apply metallic material to all meshes
+      obj.traverse((child) => {
+        if ((child as THREE.Mesh).isMesh) {
+          (child as THREE.Mesh).material = new THREE.MeshStandardMaterial({
+            color: 0x88aacc,
+            metalness: 0.7,
+            roughness: 0.3,
+          });
+        }
+      });
+
+      this.add(obj);
+
+      // Reposition engine glow behind the model
+      this.engineGlow.position.set(0, 0, size.z * scale * 0.5);
+    });
   }
 
   get speed(): number {

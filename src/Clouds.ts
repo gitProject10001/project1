@@ -111,6 +111,11 @@ export class Clouds {
         tDepth:           { value: null },
         uCameraNear:      { value: 0.5 },
         uCameraFar:       { value: 100000 },
+        // Temporal reprojection
+        uFrameIndex:          { value: 0 },
+        uTemporalEnabled:     { value: 0.0 },
+        tHistory:             { value: null },
+        uPrevViewProjMatrix:  { value: new THREE.Matrix4() },
       },
       transparent: true,
       side: THREE.BackSide,

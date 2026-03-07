@@ -33,10 +33,16 @@ varying vec3 vWorldPos;
 varying vec3 vWorldDir;
 varying vec2 vUv;
 
+// Temporal reprojection
+uniform int uFrameIndex;
+uniform float uTemporalEnabled;
+uniform sampler2D tHistory;
+uniform mat4 uPrevViewProjMatrix;
+
 // ---- Constants ----
 #define PI 3.14159265359
 #define MAX_STEPS 80
-#define NUM_LIGHT_STEPS 4
+#define NUM_LIGHT_STEPS 8
 
 // Sphere-trace margin — detail noise can push cloud density this far
 // beyond the clean form SDF surface
@@ -520,9 +526,11 @@ float lightMarch(vec3 pos, out float multiScatter) {
 
   float tau = 0.0;
   bool inShadow = false;
+  float lt = 0.0;
   for (int j = 0; j < NUM_LIGHT_STEPS; j++) {
-    float t = (float(j) + 0.5) * sunStep;
-    vec3 lightSample = pos + uSunDir * t;
+    if (lt >= sunPathLen) break;
+
+    vec3 lightSample = pos + uSunDir * lt;
 
     // Check if light ray goes through the planet
     if (length(lightSample) < uInnerRadius) {
@@ -530,18 +538,25 @@ float lightMarch(vec3 pos, out float multiScatter) {
       break;
     }
 
-    // Use cheap density (no curl noise, no domain warp) — ~4x faster
+    // SDF-guided skip: leap over empty space between cloud bodies
+    // so light steps concentrate where clouds actually exist
+    float dist = cloudFormDistance(lightSample);
+    if (dist > SDF_MARGIN) {
+      lt += max(dist - SDF_MARGIN, sunStep);
+      continue;
+    }
+
     tau += sampleCloudDensityLight(lightSample) * sunStep;
+    lt += sunStep;
   }
 
   if (inShadow) { multiScatter = 0.0; return 0.0; }
 
   // Multi-scatter: softer extinction simulates photons scattering
   // multiple times through the cloud before reaching this sample.
-  // Deeper penetration than single-scatter alone.
-  multiScatter = exp(-tau * 0.1) * 0.35;
+  multiScatter = exp(-tau * 0.12) * 0.35;
 
-  return exp(-tau * 0.6);
+  return exp(-tau * 0.8);
 }
 
 // =====================================================================
@@ -550,6 +565,32 @@ float lightMarch(vec3 pos, out float multiScatter) {
 void main() {
   vec3 rayOrigin = cameraPosition;
   vec3 rayDir = normalize(vWorldDir);
+
+  // ---- Temporal reprojection: reuse history for non-fresh pixels ----
+  if (uTemporalEnabled > 0.5) {
+    ivec2 px = ivec2(gl_FragCoord.xy);
+    int tileIndex = (px.x % 2) + (px.y % 2) * 2;
+    if (tileIndex != (uFrameIndex % 4)) {
+      // Reproject through cloud shell mid-sphere to find previous UV
+      float midRadius = (uInnerRadius + uOuterRadius) * 0.5;
+      vec2 tMid = raySphereIntersect(rayOrigin, rayDir, midRadius);
+
+      if (tMid.x < tMid.y && tMid.y > 0.0) {
+        // Use far intersection when camera is inside the shell
+        float tHit = tMid.x > 0.0 ? tMid.x : tMid.y;
+        vec3 worldHit = rayOrigin + rayDir * tHit;
+        vec4 prevClip = uPrevViewProjMatrix * vec4(worldHit, 1.0);
+        vec2 prevUV = prevClip.xy / prevClip.w * 0.5 + 0.5;
+
+        if (prevUV.x > 0.0 && prevUV.x < 1.0 && prevUV.y > 0.0 && prevUV.y < 1.0) {
+          gl_FragColor = texture2D(tHistory, prevUV);
+          return;
+        }
+      }
+
+      // No valid history — fall through to full raymarch
+    }
+  }
 
   // ---- Read scene depth to find opaque terrain ----
   float rawDepth = texture2D(tDepth, vUv).r;
@@ -564,10 +605,12 @@ void main() {
   if (tOuter.x > tOuter.y) discard; // Ray misses cloud shell entirely
 
   // Determine ray segment through the shell.
-  // If camera is below inner radius, the ray enters at tInner.y (exit of inner sphere)
-  // and exits at tOuter.y. If camera is between inner and outer, it starts at 0.
-  // If camera is above outer, it enters at tOuter.x and exits at tOuter.y (but we
-  // must skip the interior planet if the ray passes through the inner sphere).
+  // Always march to tOuter.y — the SDF height-bounds check efficiently skips
+  // the below-cloud volume inside the inner sphere. The inner sphere is the
+  // cloud base altitude, NOT the planet surface, so stopping there was wrong
+  // and created a hard seam at the tangent angle where tEnd jumped from
+  // tInner.x to tOuter.y. The terrain depth texture handles actual planet
+  // surface occlusion.
 
   float camR = length(rayOrigin);
   float tStart, tEnd;
@@ -579,21 +622,11 @@ void main() {
   } else if (camR > uOuterRadius) {
     // Camera above cloud layer
     tStart = tOuter.x;
-    // If ray also hits the inner sphere, stop at its entry (hollow shell)
-    if (tInner.x < tInner.y && tInner.x > 0.0) {
-      tEnd = tInner.x;
-    } else {
-      tEnd = tOuter.y;
-    }
+    tEnd   = tOuter.y;
   } else {
     // Camera inside the cloud shell
     tStart = 0.0;
-    // If ray hits inner sphere, stop there; otherwise march to outer exit
-    if (tInner.x < tInner.y && tInner.x > 0.0) {
-      tEnd = tInner.x;
-    } else {
-      tEnd = tOuter.y;
-    }
+    tEnd   = tOuter.y;
   }
 
   tStart = max(tStart, 0.0);
@@ -607,7 +640,7 @@ void main() {
   if (tStart >= tEnd) discard;
 
   // ---- Jitter ray start to reduce banding ----
-  float jitter = interleavedGradientNoise(gl_FragCoord.xy);
+  float jitter = interleavedGradientNoise(gl_FragCoord.xy + float(uFrameIndex) * vec2(5.588238, 3.23897));
   float segLen = tEnd - tStart;
   float fineStep = segLen / 64.0;
   float t = tStart + jitter * fineStep;
@@ -619,7 +652,6 @@ void main() {
   // length greatly exceeds the shell thickness so individual cloud
   // features remain visible from any angle.
   float shellThickness = uOuterRadius - uInnerRadius;
-  float pathRatio = segLen / shellThickness;
   // For a grazing ray (pathRatio ~ 1) densityScale = 1.0
   // For a full-diameter ray (pathRatio ~ 40+) densityScale ~ 0.15
   float densityScale = shellThickness / max(segLen, shellThickness);
@@ -713,6 +745,23 @@ void main() {
 
   // Tone-map to prevent blow-out near sun
   luminance = 1.0 - exp(-luminance);
+
+  // Temporal accumulation: blend fresh result with reprojected history
+  if (uTemporalEnabled > 0.5) {
+    float midR = (uInnerRadius + uOuterRadius) * 0.5;
+    vec2 tMidB = raySphereIntersect(rayOrigin, rayDir, midR);
+    if (tMidB.x < tMidB.y && tMidB.y > 0.0) {
+      float tHitB = tMidB.x > 0.0 ? tMidB.x : tMidB.y;
+      vec3 whB = rayOrigin + rayDir * tHitB;
+      vec4 pcB = uPrevViewProjMatrix * vec4(whB, 1.0);
+      vec2 pUV = pcB.xy / pcB.w * 0.5 + 0.5;
+      if (pUV.x > 0.0 && pUV.x < 1.0 && pUV.y > 0.0 && pUV.y < 1.0) {
+        vec4 hist = texture2D(tHistory, pUV);
+        gl_FragColor = mix(hist, vec4(luminance, alpha), 0.2);
+        return;
+      }
+    }
+  }
 
   gl_FragColor = vec4(luminance, alpha);
 }

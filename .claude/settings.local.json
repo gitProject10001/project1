@@ -12,7 +12,12 @@
       "Bash(node -e \":*)",
       "Bash(wc -l \"C:\\\\Users\\\\jonny\\\\Desktop\\\\tree\\\\src\\\\shaders\"/*.glsl)",
       "WebFetch(domain:www.shadertoy.com)",
-      "WebFetch(domain:raw.githubusercontent.com)"
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(npm install fflate)",
+      "Bash(npm install assimpjs)",
+      "Bash(node convert-fbx.mjs)",
+      "Bash(npm install fbx-parser)",
+      "Bash(npm uninstall assimpjs fbx-parser --prefix /c/Users/jonny/Desktop/tree)"
     ]
   }
 }
